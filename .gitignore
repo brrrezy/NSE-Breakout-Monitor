@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+
+# NSE Screener Specific
+nse_screener_cache.db
+Predicta_Top10.xlsx
+NSE_Swing_Screener_Report.xlsx
+EQUITY_L.csv
+.DS_Store
