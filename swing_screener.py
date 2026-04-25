@@ -270,49 +270,59 @@ def run_full_system(
     
     counters = {"total_universe": len(stocks), "scanned": 0, "passed_filter": 0, "errors": 0}
 
-    print(f"Hyper-Scanning {len(stocks)} symbols...")
-    try:
-        # Use a higher thread count for the bulk download (it is generally safer)
-        bulk_df = yf.download(tickers=" ".join(stocks), period=period, interval=interval, group_by="ticker", threads=True, progress=False)
-    except:
-        bulk_df = pd.DataFrame()
-
+    print(f"Hyper-Scanning {len(stocks)} symbols in chunks...")
     candidates = []
-    for sym in tqdm(stocks, desc="Analyzing"):
-        counters["scanned"] += 1
+    chunk_size = 50
+    import gc
+    
+    for i in range(0, len(stocks), chunk_size):
+        chunk = stocks[i : i + chunk_size]
         try:
-            if sym not in bulk_df.columns.levels[0]: continue
-            df = bulk_df[sym].dropna(how="all").copy()
-            if len(df) < 90: continue
+            # Use a conservative thread count per chunk
+            bulk_df = yf.download(tickers=" ".join(chunk), period=period, interval=interval, group_by="ticker", threads=10, progress=False)
+        except Exception as e:
+            print(f"Chunk download failed: {e}")
+            bulk_df = pd.DataFrame()
 
-            df = add_technical_indicators(normalize_ohlcv_df(df))
-            latest = df.iloc[-1]
-            conf_score, conf_sigs = predicta_v4_confluence(latest)
-            
-            # If manual search, bypass the score filter so user can see the data
-            if not manual_symbols and conf_score < min_confluence_score:
-                continue
+        for sym in tqdm(chunk, desc=f"Analyzing Chunk {i//chunk_size + 1}"):
+            counters["scanned"] += 1
+            try:
+                if sym not in bulk_df.columns.levels[0]: continue
+                df = bulk_df[sym].dropna(how="all").copy()
+                if len(df) < 90: continue
 
-            counters["passed_filter"] += 1
-            vcp = detect_vcp(df)
-            sfp = detect_swing_failure(df)
-            ipo = detect_ipo_base(sym)
-            minervini = detect_minervini_trend(df)
-            rs_raw = calculate_rs_raw(df)
-            
-            setup_score = (2 if vcp else 0) + (2 if sfp else 0) + (1 if ipo else 0) + (1 if minervini else 0)
-            row = {
-                "Symbol": sym, "Score": conf_score + setup_score,
-                "ConfluenceScore": conf_score, "SetupScore": setup_score,
-                "Minervini": minervini, "VCP": vcp, "SFP": sfp, "IPO_BASE": ipo,
-                "Price": float(latest["Close"]),
-                "RSI": float(latest["rsi"]), "VolMult": float(latest["vol_mult"]),
-                "ADR%": float(latest["adrp20"]), "RVol": float(latest["rvol50"]),
-                **{f"C_{k}": v for k, v in conf_sigs.items()}
-            }
-            candidates.append(Candidate(sym, row["Score"], row["Price"], rs_raw, row))
-        except:
-            counters["errors"] += 1
+                df = add_technical_indicators(normalize_ohlcv_df(df))
+                latest = df.iloc[-1]
+                conf_score, conf_sigs = predicta_v4_confluence(latest)
+                
+                # If manual search, bypass the score filter so user can see the data
+                if not manual_symbols and conf_score < min_confluence_score:
+                    continue
+
+                counters["passed_filter"] += 1
+                vcp = detect_vcp(df)
+                sfp = detect_swing_failure(df)
+                ipo = detect_ipo_base(sym)
+                minervini = detect_minervini_trend(df)
+                rs_raw = calculate_rs_raw(df)
+                
+                setup_score = (2 if vcp else 0) + (2 if sfp else 0) + (1 if ipo else 0) + (1 if minervini else 0)
+                row = {
+                    "Symbol": sym, "Score": conf_score + setup_score,
+                    "ConfluenceScore": conf_score, "SetupScore": setup_score,
+                    "Minervini": minervini, "VCP": vcp, "SFP": sfp, "IPO_BASE": ipo,
+                    "Price": float(latest["Close"]),
+                    "RSI": float(latest["rsi"]), "VolMult": float(latest["vol_mult"]),
+                    "ADR%": float(latest["adrp20"]), "RVol": float(latest["rvol50"]),
+                    **{f"C_{k}": v for k, v in conf_sigs.items()}
+                }
+                candidates.append(Candidate(sym, row["Score"], row["Price"], rs_raw, row))
+            except:
+                counters["errors"] += 1
+        
+        # Explicitly clear chunk data and collect garbage to keep memory usage low
+        del bulk_df
+        gc.collect()
 
     if not candidates: return pd.DataFrame()
 
