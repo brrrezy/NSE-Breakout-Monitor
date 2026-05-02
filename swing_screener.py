@@ -584,73 +584,88 @@ def parse_args():
     p.add_argument("--start-index", type=int, default=0)
     p.add_argument("--live", action="store_true", help="Run in live monitoring mode during market hours")
     p.add_argument("--interval-min", type=int, default=15, help="Scan interval in minutes for live mode")
+    p.add_argument("--test-alert", action="store_true", help="Send a test Telegram message and exit")
     return p.parse_args()
 
 
 if __name__ == "__main__":
-    args = parse_args()
+    import traceback
+    import sys
 
-    if args.live:
-        print(f"🚀 LIVE MONITORING MODE STARTED (Interval: {args.interval_min}m)")
-        print(f"Alerts will be sent to Telegram for ACTIONABLE breakouts.")
-        
-        while True:
-            if is_market_open():
-                print(f"\n[{dt.datetime.now().strftime('%H:%M:%S')}] Starting live scan...")
-                results = run_full_system(
-                    args.universe_limit,
-                    args.min_score,
-                    args.period,
-                    "15m",  # Use shorter interval for live triggers if possible, or stick to 1d
-                    args.top_n,
-                    args.start_index,
-                )
-                
-                # Check for new Actionable alerts
-                if not results.empty:
-                    actionable = results[results["Status"] == "ACTIONABLE"]
-                    for _, row in actionable.iterrows():
-                        if row["Symbol"] not in alerted_today:
-                            msg = (
-                                f"🔥 *ENTRY CONFIRMED: {row['Symbol']}*\n"
-                                f"💰 Price: {row['Price']:.2f}\n"
-                                f"🎯 Pivot: {row['Pivot']:.2f}\n"
-                                f"📝 Notes: {row['Notes']}\n"
-                                f"📊 Score: {row['Score']}"
-                            )
-                            send_telegram_message(msg)
-                            alerted_today.add(row["Symbol"])
-                
-                print(f"Scan complete. Sleeping for {args.interval_min} minutes...")
-                time.sleep(args.interval_min * 60)
-            else:
-                # If market is closed, check again in 5 minutes
-                # Also reset alerts at start of a new day
-                if dt.datetime.now().hour == 0:
-                    alerted_today.clear()
-                
-                print(f"\r[{dt.datetime.now().strftime('%H:%M:%S')}] Market is closed. Waiting...", end="")
-                time.sleep(300)
-    else:
-        results = run_full_system(
-            args.universe_limit,
-            args.min_score,
-            args.period,
-            args.interval,
-            args.top_n,
-            args.start_index,
-        )
-        
-        # In non-live mode (like GitHub Actions), send alerts for ACTIONABLE stocks
-        if not results.empty and (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
-            actionable = results[results["Status"] == "ACTIONABLE"]
-            for _, row in actionable.iterrows():
-                msg = (
-                    f"🔥 *ENTRY CONFIRMED: {row['Symbol']}*\n"
-                    f"💰 Price: {row['Price']:.2f}\n"
-                    f"🎯 Pivot: {row['Pivot']:.2f}\n"
-                    f"📝 Notes: {row['Notes']}\n"
-                    f"📊 Score: {row['Score']}"
-                )
-                send_telegram_message(msg)
-                print(f"Alert sent for {row['Symbol']}")
+    try:
+        args = parse_args()
+
+        if args.test_alert:
+            print("Sending test alert to Telegram...")
+            send_telegram_message("🔔 *Test Alert*: Your NSE Screener is successfully connected to Telegram! 🚀")
+            print("Done. Check your phone!")
+            sys.exit(0)
+
+        if args.live:
+            print(f"🚀 LIVE MONITORING MODE STARTED (Interval: {args.interval_min}m)")
+            print(f"Alerts will be sent to Telegram for ACTIONABLE breakouts.")
+            
+            while True:
+                if is_market_open():
+                    print(f"\n[{dt.datetime.now().strftime('%H:%M:%S')}] Starting live scan...")
+                    results = run_full_system(
+                        args.universe_limit,
+                        args.min_score,
+                        args.period,
+                        "15m",  # Use shorter interval for live triggers if possible, or stick to 1d
+                        args.top_n,
+                        args.start_index,
+                    )
+                    
+                    # Check for new Actionable alerts
+                    if not results.empty:
+                        actionable = results[results["Status"] == "ACTIONABLE"]
+                        for _, row in actionable.iterrows():
+                            if row["Symbol"] not in alerted_today:
+                                msg = (
+                                    f"🔥 *ENTRY CONFIRMED: {row['Symbol']}*\n"
+                                    f"💰 Price: {row['Price']:.2f}\n"
+                                    f"🎯 Pivot: {row['Pivot']:.2f}\n"
+                                    f"📝 Notes: {row['Notes']}\n"
+                                    f"📊 Score: {row['Score']}"
+                                )
+                                send_telegram_message(msg)
+                                alerted_today.add(row["Symbol"])
+                    
+                    print(f"Scan complete. Sleeping for {args.interval_min} minutes...")
+                    time.sleep(args.interval_min * 60)
+                else:
+                    # If market is closed, check again in 5 minutes
+                    # Also reset alerts at start of a new day
+                    if dt.datetime.now().hour == 0:
+                        alerted_today.clear()
+                    
+                    print(f"\r[{dt.datetime.now().strftime('%H:%M:%S')}] Market is closed. Waiting...", end="")
+                    time.sleep(300)
+        else:
+            results = run_full_system(
+                args.universe_limit,
+                args.min_score,
+                args.period,
+                args.interval,
+                args.top_n,
+                args.start_index,
+            )
+            
+            # In non-live mode (like GitHub Actions), send alerts for ACTIONABLE stocks
+            if not results.empty and (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
+                actionable = results[results["Status"] == "ACTIONABLE"]
+                for _, row in actionable.iterrows():
+                    msg = (
+                        f"🔥 *ENTRY CONFIRMED: {row['Symbol']}*\n"
+                        f"💰 Price: {row['Price']:.2f}\n"
+                        f"🎯 Pivot: {row['Pivot']:.2f}\n"
+                        f"📝 Notes: {row['Notes']}\n"
+                        f"📊 Score: {row['Score']}"
+                    )
+                    send_telegram_message(msg)
+                    print(f"Alert sent for {row['Symbol']}")
+    except Exception as e:
+        print("❌ CRITICAL ERROR IN SCREENER:")
+        traceback.print_exc()
+        sys.exit(1)
