@@ -1,232 +1,336 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NSE Swing Screener | Institutional Terminal</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-</head>
-<body>
-    <div class="app-container">
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="sidebar-header">
-                <div class="logo">
-                    <div class="logo-icon">
-                        <i class="fas fa-bolt"></i>
-                    </div>
-                    <div class="logo-text">
-                        <span>NSE Swing Screener</span>
-                        <small>Swing v4.2</small>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>NSE Swing Screener</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+            rel="stylesheet"
+        />
+        <link rel="stylesheet" href="style.css" />
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
+        />
+    </head>
+    <body>
+        <div class="app-container">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <div class="logo">
+                        <div class="logo-icon">
+                            <i class="fas fa-bolt"></i>
+                        </div>
+                        <div class="logo-text">
+                            <span>NSE Swing Screener</span>
+                            <small>by brrezy</small>
+                        </div>
                     </div>
                 </div>
-            </div>
-            
-            <form id="scan-form">
-                <div class="sidebar-section">
-                    <label class="section-label">Scan Parameters</label>
-                    <div class="form-group" style="position: relative;">
-                        <label for="symbol"><i class="fas fa-search"></i> Manual Ticker</label>
-                        <input type="text" id="symbol" name="symbol" placeholder="e.g. RELIANCE.NS" autocomplete="off">
-                        <div id="ticker-suggestions" class="suggestions-dropdown"></div>
-                    </div>
 
-                    <div class="form-group">
-                        <label for="universe_limit"><i class="fas fa-layer-group"></i> Universe Limit</label>
-                        <input type="number" id="universe_limit" name="universe_limit" value="500" min="0" max="5000">
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="start_index"><i class="fas fa-list-ol"></i> Start Index</label>
-                        <input type="number" id="start_index" name="start_index" value="0" min="0">
-                    </div>
-                    
-                    <div class="form-row">
+                <form id="scan-form">
+                    <div class="sidebar-section">
+                        <label class="section-label">Scan Parameters</label>
+                        <div class="form-group" style="position: relative">
+                            <label for="symbol"
+                                ><i class="fas fa-search"></i> Manual
+                                Search</label
+                            >
+                            <input
+                                type="text"
+                                id="symbol"
+                                name="symbol"
+                                placeholder="e.g. RELIANCE.NS"
+                                autocomplete="off"
+                            />
+                            <div
+                                id="ticker-suggestions"
+                                class="suggestions-dropdown"
+                            ></div>
+                        </div>
+
                         <div class="form-group">
-                            <label for="period"><i class="fas fa-calendar-alt"></i> Period</label>
-                            <select id="period" name="period">
-                                <option value="6mo">6 Months</option>
-                                <option value="1y">1 Year</option>
-                                <option value="2y" selected>2 Years</option>
-                            </select>
+                            <label for="universe_limit"
+                                ><i class="fas fa-layer-group"></i> Universe
+                                Limit</label
+                            >
+                            <input
+                                type="number"
+                                id="universe_limit"
+                                name="universe_limit"
+                                value="500"
+                                min="0"
+                                max="5000"
+                            />
                         </div>
-                    </div>
-                </div>
 
-                <div class="sidebar-section">
-                    <label class="section-label">Thresholds</label>
-                    <div class="form-group">
-                        <div class="label-with-val">
-                            <label for="min_score">Min Confluence</label>
-                            <span id="min_score_val" class="val-badge">6</span>
+                        <div class="form-group">
+                            <label for="start_index"
+                                ><i class="fas fa-list-ol"></i> Start
+                                Index</label
+                            >
+                            <input
+                                type="number"
+                                id="start_index"
+                                name="start_index"
+                                value="0"
+                                min="0"
+                            />
                         </div>
-                        <input type="range" id="min_score" name="min_score" min="0" max="8" value="6">
-                    </div>
-                    
-                    <div class="form-group">
-                        <div class="label-with-val">
-                            <label for="top_n">Display Count</label>
-                            <span id="top_n_val" class="val-badge">10</span>
-                        </div>
-                        <input type="range" id="top_n" name="top_n" min="5" max="50" step="5" value="10">
-                    </div>
-                </div>
-                
-                <button type="submit" id="run-btn" class="btn-primary">
-                    <span class="btn-text">Initialize Scan</span>
-                    <i class="fas fa-chevron-right"></i>
-                </button>
-            </form>
-            
-            <div class="sidebar-footer">
-                <button id="download-btn" class="btn-secondary" disabled>
-                    <i class="fas fa-download"></i> Export Data
-                </button>
-            </div>
-        </aside>
 
-        <!-- Main Content -->
-        <main class="main-content">
-            <header class="top-bar">
-                <div class="header-left">
-                    <div class="breadcrumb">Dashboard / Swing Screener</div>
-                    <h1>NSE Swing Screener</h1>
-                </div>
-                <div class="header-right">
-                    <div class="status-indicator">
-                        <div class="pulse" id="pulse-dot"></div>
-                        <span id="status-badge">System Ready</span>
-                    </div>
-                </div>
-            </header>
-
-            <section class="dashboard">
-                <!-- Summary Cards -->
-                <div class="summary-grid" id="summary-grid">
-                    <div class="summary-card">
-                        <div class="card-icon blue"><i class="fas fa-globe"></i></div>
-                        <div class="card-info">
-                            <span class="label">Total Universe</span>
-                            <span class="value" id="stat-universe">-</span>
-                        </div>
-                    </div>
-                    <div class="summary-card">
-                        <div class="card-icon purple"><i class="fas fa-microchip"></i></div>
-                        <div class="card-info">
-                            <span class="label">Stocks Scanned</span>
-                            <span class="value" id="stat-scanned">-</span>
-                        </div>
-                    </div>
-                    <div class="summary-card">
-                        <div class="card-icon green"><i class="fas fa-check-circle"></i></div>
-                        <div class="card-info">
-                            <span class="label">Passed Filter</span>
-                            <span class="value" id="stat-passed">-</span>
-                        </div>
-                    </div>
-                    <div class="summary-card">
-                        <div class="card-icon red"><i class="fas fa-exclamation-triangle"></i></div>
-                        <div class="card-info">
-                            <span class="label">Error Rate</span>
-                            <span class="value" id="stat-errors">-</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Table Section -->
-                <div class="table-container-outer">
-                    <div class="table-container glass">
-                        <div class="table-header">
-                            <div class="title-with-subtitle">
-                                <h2>Top Alpha Candidates</h2>
-                                <p>Ranked by Predicta Multi-Factor Score</p>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="period"
+                                    ><i class="fas fa-calendar-alt"></i>
+                                    Period</label
+                                >
+                                <select id="period" name="period">
+                                    <option value="6mo">6 Months</option>
+                                    <option value="1y">1 Year</option>
+                                    <option value="2y" selected>2 Years</option>
+                                </select>
                             </div>
-                            <div class="table-actions">
-                                <div class="search-box">
-                                    <i class="fas fa-search"></i>
-                                    <input type="text" id="table-search" placeholder="Quick Filter...">
+                        </div>
+                    </div>
+
+                    <div class="sidebar-section">
+                        <label class="section-label">Thresholds</label>
+                        <div class="form-group">
+                            <div class="label-with-val">
+                                <label for="min_score">Min Confluence</label>
+                                <span id="min_score_val" class="val-badge"
+                                    >6</span
+                                >
+                            </div>
+                            <input
+                                type="range"
+                                id="min_score"
+                                name="min_score"
+                                min="0"
+                                max="8"
+                                value="6"
+                            />
+                        </div>
+
+                        <div class="form-group">
+                            <div class="label-with-val">
+                                <label for="top_n">Display Count</label>
+                                <span id="top_n_val" class="val-badge">10</span>
+                            </div>
+                            <input
+                                type="range"
+                                id="top_n"
+                                name="top_n"
+                                min="5"
+                                max="50"
+                                step="5"
+                                value="10"
+                            />
+                        </div>
+                    </div>
+
+                    <button type="submit" id="run-btn" class="btn-primary">
+                        <span class="btn-text">Initialize Scan</span>
+                        <i class="fas fa-chevron-right"></i>
+                    </button>
+                </form>
+
+                <div class="sidebar-footer">
+                    <button id="download-btn" class="btn-secondary" disabled>
+                        <i class="fas fa-download"></i> Export Data
+                    </button>
+                </div>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="main-content">
+                <header class="top-bar">
+                    <div class="header-left">
+                        <div class="breadcrumb">Dashboard / Swing Screener</div>
+                        <h1>NSE Swing Screener</h1>
+                    </div>
+                    <div class="header-right">
+                        <div class="status-indicator">
+                            <div class="pulse" id="pulse-dot"></div>
+                            <span id="status-badge">System Ready</span>
+                        </div>
+                    </div>
+                </header>
+
+                <section class="dashboard">
+                    <!-- Summary Cards -->
+                    <div class="summary-grid" id="summary-grid">
+                        <div class="summary-card">
+                            <div class="card-icon blue">
+                                <i class="fas fa-globe"></i>
+                            </div>
+                            <div class="card-info">
+                                <span class="label">Total Universe</span>
+                                <span class="value" id="stat-universe">-</span>
+                            </div>
+                        </div>
+                        <div class="summary-card">
+                            <div class="card-icon purple">
+                                <i class="fas fa-microchip"></i>
+                            </div>
+                            <div class="card-info">
+                                <span class="label">Stocks Scanned</span>
+                                <span class="value" id="stat-scanned">-</span>
+                            </div>
+                        </div>
+                        <div class="summary-card">
+                            <div class="card-icon green">
+                                <i class="fas fa-check-circle"></i>
+                            </div>
+                            <div class="card-info">
+                                <span class="label">Passed Filter</span>
+                                <span class="value" id="stat-passed">-</span>
+                            </div>
+                        </div>
+                        <div class="summary-card">
+                            <div class="card-icon red">
+                                <i class="fas fa-exclamation-triangle"></i>
+                            </div>
+                            <div class="card-info">
+                                <span class="label">Error Rate</span>
+                                <span class="value" id="stat-errors">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Table Section -->
+                    <div class="table-container-outer">
+                        <div class="table-container glass">
+                            <div class="table-header">
+                                <div class="title-with-subtitle">
+                                    <h2>Top Stocks</h2>
+                                    <p>Ranked by Multi-Factor Score</p>
+                                </div>
+                                <div class="table-actions">
+                                    <div class="search-box">
+                                        <i class="fas fa-search"></i>
+                                        <input
+                                            type="text"
+                                            id="table-search"
+                                            placeholder="Quick Filter..."
+                                        />
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                        
-                        <div class="table-wrapper">
-                            <table id="results-table">
-                                <thead>
-                                    <tr>
-                                        <th>Ticker</th>
-                                        <th>Score</th>
-                                        <th>RS Rating</th>
-                                        <th>Technical</th>
-                                        <th>Setups</th>
-                                        <th>LTP</th>
-                                        <th>RSI</th>
-                                        <th>Volume</th>
-                                        <th>ADR%</th>
-                                        <th>Setup Flow</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="results-body">
-                                    <tr class="empty-state">
-                                        <td colspan="10">
-                                            <div class="empty-msg">
-                                                <i class="fas fa-chart-bar"></i>
-                                                <p>Ready to analyze the NSE market</p>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            </section>
 
-            <footer class="app-footer">
-                <div class="footer-top">
-                    <div class="footer-branding">
-                        <span class="footer-logo">NSE Swing Screener</span>
-                        <p>Institutional-grade quantitative analysis for the Indian equity markets.</p>
-                        <div class="footer-links">
-                            <a href="https://github.com/brrrezy" target="_blank"><i class="fab fa-github"></i> GitHub</a>
-                            <a href="https://shivanshusr.vercel.app/" target="_blank"><i class="fas fa-external-link-alt"></i> Portfolio</a>
+                            <div class="table-wrapper">
+                                <table id="results-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Ticker</th>
+                                            <th>Score</th>
+                                            <th>RS Rating</th>
+                                            <th>Technical</th>
+                                            <th>Setups</th>
+                                            <th>LTP</th>
+                                            <th>RSI</th>
+                                            <th>Volume</th>
+                                            <th>ADR%</th>
+                                            <th>Setup Flow</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="results-body">
+                                        <tr class="empty-state">
+                                            <td colspan="10">
+                                                <div class="empty-msg">
+                                                    <i
+                                                        class="fas fa-chart-bar"
+                                                    ></i>
+                                                    <p>
+                                                        Ready to analyze the NSE
+                                                        market
+                                                    </p>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
-                    <div class="footer-legal">
-                        <div class="legal-section">
-                            <h4>Financial Advisory</h4>
-                            <p>This tool is for educational and research purposes only. We are not SEBI-registered advisors. All trading involves significant risk of loss.</p>
-                        </div>
-                        <div class="legal-section">
-                            <h4>Data & Terms</h4>
-                            <p>Data is provided by Yahoo Finance and may be delayed. By using this tool, you agree to our terms and conditions and assume all responsibility for your trades.</p>
-                        </div>
-                    </div>
-                </div>
-                <div class="footer-bottom">
-                    <p>&copy; 2024 NSE Swing Screener. Made by <a href="https://shivanshusr.vercel.app/" target="_blank">brrrezy</a> in India with <span style="color: #ef4444;">❤</span></p>
-                </div>
-            </footer>
-        </main>
-    </div>
+                </section>
 
-    <!-- Enhanced Loader -->
-    <div class="loader-overlay" id="loader">
-        <div class="loader-content">
-            <div class="scanner-container">
-                <div class="scanner-line"></div>
-                <div class="scanner-box"></div>
-            </div>
-            <div class="loading-text-container">
-                <p class="main-loading">Executing Predicta Scan</p>
-                <span id="loading-msg">Synthesizing market data...</span>
+                <footer class="app-footer">
+                    <div class="footer-top">
+                        <div class="footer-branding">
+                            <span class="footer-logo">NSE Swing Screener</span>
+                            <p>
+                                Quantitative analysis for the Indian equity
+                                markets.
+                            </p>
+                            <div class="footer-links">
+                                <a
+                                    href="https://github.com/brrrezy"
+                                    target="_blank"
+                                    ><i class="fab fa-github"></i> GitHub</a
+                                >
+                                <a
+                                    href="https://shivanshusr.vercel.app/"
+                                    target="_blank"
+                                    ><i class="fas fa-external-link-alt"></i>
+                                    Portfolio</a
+                                >
+                            </div>
+                        </div>
+                        <div class="footer-legal">
+                            <div class="legal-section">
+                                <h4>Financial Advisory</h4>
+                                <p>
+                                    This tool is for educational and research
+                                    purposes only. We are not SEBI-registered
+                                    advisors. All trading involves significant
+                                    risk of loss.
+                                </p>
+                            </div>
+                            <div class="legal-section">
+                                <h4>Data & Terms</h4>
+                                <p>
+                                    Data is provided by Yahoo Finance and may be
+                                    delayed. By using this tool, you agree to
+                                    our terms and conditions and assume all
+                                    responsibility for your trades.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="footer-bottom">
+                        <p>
+                            &copy; 2024 NSE Swing Screener. Made by
+                            <a
+                                href="https://shivanshusr.vercel.app/"
+                                target="_blank"
+                                >brrrezy</a
+                            >
+                            in India with <span style="color: #ef4444">❤</span>
+                        </p>
+                    </div>
+                </footer>
+            </main>
+        </div>
+
+        <!-- Enhanced Loader -->
+        <div class="loader-overlay" id="loader">
+            <div class="loader-content">
+                <div class="scanner-container">
+                    <div class="scanner-line"></div>
+                    <div class="scanner-box"></div>
+                </div>
+                <div class="loading-text-container">
+                    <p class="main-loading">Executing Market Scan</p>
+                    <span id="loading-msg">Synthesizing market data...</span>
+                </div>
             </div>
         </div>
-    </div>
 
-    <script src="script.js"></script>
-</body>
+        <script src="script.js"></script>
+    </body>
 </html>
