@@ -551,7 +551,7 @@ def run_full_system(
     ).astype(int)
 
     top = (
-        df_results.sort_values(by=["Score", "RSRating"], ascending=False)
+        df_results.sort_values(by=["Breakout", "VCP_Setup", "Score", "RSRating"], ascending=False)
         .head(top_n)
         .reset_index(drop=True)
     )
@@ -578,7 +578,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--universe-limit", type=int, default=500)
     p.add_argument("--min-score", type=int, default=6)
-    p.add_argument("--period", type=str, default="2y")
+    p.add_argument("--period", type=str, default="1y")
     p.add_argument("--interval", type=str, default="1d")
     p.add_argument("--top-n", type=int, default=10)
     p.add_argument("--start-index", type=int, default=0)

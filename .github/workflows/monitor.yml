@@ -4,9 +4,9 @@ on:
   schedule:
     # NSE Market Hours: 09:15 to 15:30 IST
     # UTC: 03:45 to 10:00 UTC
-    # Runs every 15 minutes during market hours, Monday to Friday
-    - cron: '*/15 4-9 * * 1-5'
-    - cron: '45 3 * * 1-5' # Catch the 09:15 AM IST open
+    # Runs every 10 minutes during market hours, Monday to Friday
+    - cron: '*/10 4-9 * * 1-5'
+    - cron: '45 3 * * 1-5' # 09:15 AM IST Opening Bell
   workflow_dispatch: # Allows manual run
 
 jobs:
@@ -32,4 +32,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           # Setting universe-limit to 0 scans the entire NSE market (~2,000 stocks).
-          python3 swing_screener.py --universe-limit 0 --interval 1d
+          # Showing top 25 candidates prioritized by Breakout status.
+          # Using 1y period for faster execution (sufficient for Trend Template).
+          python3 swing_screener.py --universe-limit 0 --period 1y --interval 1d --top-n 25
