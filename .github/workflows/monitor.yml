@@ -31,6 +31,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # We use 1d interval because 15m is only available for 60 days.
-          # 1d data includes the current live price during market hours.
-          python3 swing_screener.py --universe-limit 500 --interval 1d
+          # Setting universe-limit to 0 scans the entire NSE market (~2,000 stocks).
+          python3 swing_screener.py --universe-limit 0 --interval 1d

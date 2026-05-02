@@ -114,7 +114,7 @@ def get_nse_stocks(cache_ttl_hours: int = 24) -> List[str]:
         NSE_EQUITY_LIST_CACHE.write_text(resp.text, encoding="utf-8")
         lines = resp.text.splitlines()
         return [
-            l.split(',')[0].strip().strip('"') + ".NS" for l in lines[1:] if l.strip()
+            l.split(',')[0].strip().strip('"').replace('$', '') + ".NS" for l in lines[1:] if l.strip()
         ]
     except Exception:
         return []
