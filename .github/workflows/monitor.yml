@@ -31,6 +31,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # We run the script in standard mode (not --live) 
-          # because GitHub Actions handles the scheduling for us.
-          python3 swing_screener.py --universe-limit 500 --interval 15m
+          # We use 1d interval because 15m is only available for 60 days.
+          # 1d data includes the current live price during market hours.
+          python3 swing_screener.py --universe-limit 500 --interval 1d

@@ -612,7 +612,7 @@ if __name__ == "__main__":
                         args.universe_limit,
                         args.min_score,
                         args.period,
-                        "15m",  # Use shorter interval for live triggers if possible, or stick to 1d
+                        "1d",  # Use 1d to allow long-term indicators (200MA) while getting live price
                         args.top_n,
                         args.start_index,
                     )
