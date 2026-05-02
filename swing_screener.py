@@ -16,6 +16,12 @@ import ta
 import yfinance as yf
 from tqdm import tqdm
 
+# Constants for IST Conversion
+IST_OFFSET = dt.timedelta(hours=5, minutes=30)
+
+def get_now_ist():
+    return dt.datetime.now(dt.timezone.utc) + IST_OFFSET
+
 # ============================================================
 # 1) CONFIG & CACHE PATHS
 # ============================================================
@@ -23,6 +29,8 @@ from tqdm import tqdm
 _DEFAULT_CACHE_DIR = Path(tempfile.gettempdir()) / "nse_screener_cache"
 CACHE_DIR = Path(os.environ.get("NSE_SCREENER_CACHE_DIR", str(_DEFAULT_CACHE_DIR)))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+WATCHLIST_FILE = Path("watchlist_persistent.json")
 
 NSE_EQUITY_LIST_CACHE = CACHE_DIR / "EQUITY_L.csv"
 DB_PATH = Path("nse_screener_cache.db")
@@ -133,13 +141,10 @@ def send_telegram_message(message: str):
 
 def is_market_open() -> bool:
     # NSE Hours: 09:15 to 15:30 IST
-    now = dt.datetime.now()
+    now = get_now_ist()
     # Check if it's a weekday
     if now.weekday() >= 5:
         return False
-    # Check time (IST is approx UTC+5.5)
-    # This check assumes the system time is in IST. 
-    # If system is UTC, adjust accordingly.
     current_time = now.time()
     start_time = dt.time(9, 15)
     end_time = dt.time(15, 30)
@@ -601,25 +606,50 @@ if __name__ == "__main__":
             print("Done. Check your phone!")
             sys.exit(0)
 
+        # 1. Check for Morning Priority Scan (09:15 IST)
+        now_ist = get_now_ist()
+        is_morning = now_ist.hour == 9 and 10 <= now_ist.minute <= 45
+        is_eod = now_ist.hour == 15 and 20 <= now_ist.minute <= 50
+
+        priority_symbols = []
+        if WATCHLIST_FILE.exists():
+            try:
+                priority_symbols = json.loads(WATCHLIST_FILE.read_text())
+                print(f"Loaded {len(priority_symbols)} priority symbols from yesterday.")
+            except:
+                pass
+
         if args.live:
             print(f"🚀 LIVE MONITORING MODE STARTED (Interval: {args.interval_min}m)")
             print(f"Alerts will be sent to Telegram for ACTIONABLE breakouts.")
             
             while True:
                 if is_market_open():
-                    print(f"\n[{dt.datetime.now().strftime('%H:%M:%S')}] Starting live scan...")
+                    now_ist = get_now_ist()
+                    is_morning = now_ist.hour == 9 and 10 <= now_ist.minute <= 45
+                    is_eod = now_ist.hour == 15 and 20 <= now_ist.minute <= 50
+
+                    print(f"\n[{now_ist.strftime('%H:%M:%S')}] Starting live scan...")
+                    
+                    # Morning Priority Check
+                    scan_symbols = priority_symbols if (is_morning and priority_symbols) else None
+                    if is_morning and priority_symbols:
+                        send_telegram_message("🌅 *MORNING PRIORITY SCAN*: Checking yesterday's watchlist...")
+
                     results = run_full_system(
-                        args.universe_limit,
+                        args.universe_limit if not scan_symbols else 0,
                         args.min_score,
                         args.period,
-                        "1d",  # Use 1d to allow long-term indicators (200MA) while getting live price
+                        "1d",
                         args.top_n,
                         args.start_index,
+                        manual_symbols=scan_symbols
                     )
                     
-                    # Check for new Actionable alerts
                     if not results.empty:
                         actionable = results[results["Status"] == "ACTIONABLE"]
+                        watchlist = results[results["Status"] == "WATCHLIST"]
+
                         for _, row in actionable.iterrows():
                             if row["Symbol"] not in alerted_today:
                                 msg = (
@@ -627,44 +657,57 @@ if __name__ == "__main__":
                                     f"💰 Price: {row['Price']:.2f}\n"
                                     f"🎯 Pivot: {row['Pivot']:.2f}\n"
                                     f"📝 Notes: {row['Notes']}\n"
-                                    f"📊 Score: {row['Score']}"
                                 )
                                 send_telegram_message(msg)
                                 alerted_today.add(row["Symbol"])
+                        
+                        if is_eod:
+                            watchlist_symbols = watchlist["Symbol"].tolist()
+                            WATCHLIST_FILE.write_text(json.dumps(watchlist_symbols))
+                            if watchlist_symbols:
+                                summary = "\n".join([f"• {s}" for s in watchlist_symbols[:15]])
+                                send_telegram_message(f"🏁 *MARKET CLOSED: Final Watchlist*\n\n{summary}")
                     
                     print(f"Scan complete. Sleeping for {args.interval_min} minutes...")
                     time.sleep(args.interval_min * 60)
                 else:
-                    # If market is closed, check again in 5 minutes
-                    # Also reset alerts at start of a new day
                     if dt.datetime.now().hour == 0:
                         alerted_today.clear()
-                    
                     print(f"\r[{dt.datetime.now().strftime('%H:%M:%S')}] Market is closed. Waiting...", end="")
                     time.sleep(300)
         else:
+            # Non-live (GitHub Actions) mode
+            scan_symbols = priority_symbols if (is_morning and priority_symbols) else None
             results = run_full_system(
-                args.universe_limit,
+                args.universe_limit if not scan_symbols else 0,
                 args.min_score,
                 args.period,
                 args.interval,
                 args.top_n,
                 args.start_index,
+                manual_symbols=scan_symbols
             )
             
-            # In non-live mode (like GitHub Actions), send alerts for ACTIONABLE stocks
-            if not results.empty and (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
+            if not results.empty:
                 actionable = results[results["Status"] == "ACTIONABLE"]
+                watchlist = results[results["Status"] == "WATCHLIST"]
+
                 for _, row in actionable.iterrows():
                     msg = (
                         f"🔥 *ENTRY CONFIRMED: {row['Symbol']}*\n"
                         f"💰 Price: {row['Price']:.2f}\n"
                         f"🎯 Pivot: {row['Pivot']:.2f}\n"
                         f"📝 Notes: {row['Notes']}\n"
-                        f"📊 Score: {row['Score']}"
                     )
                     send_telegram_message(msg)
-                    print(f"Alert sent for {row['Symbol']}")
+
+                if is_eod:
+                    watchlist_symbols = watchlist["Symbol"].tolist()
+                    WATCHLIST_FILE.write_text(json.dumps(watchlist_symbols))
+                    if watchlist_symbols:
+                        summary = "\n".join([f"• {s}" for s in watchlist_symbols[:15]])
+                        send_telegram_message(f"🏁 *MARKET CLOSED: Final Watchlist*\n\n{summary}")
+
     except Exception as e:
         print("❌ CRITICAL ERROR IN SCREENER:")
         traceback.print_exc()

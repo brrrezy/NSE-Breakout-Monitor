@@ -26,12 +26,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Restore Watchlist Cache
+        uses: actions/cache@v3
+        with:
+          path: watchlist_persistent.json
+          key: watchlist-${{ github.run_number }}
+          restore-keys: |
+            watchlist-
+
       - name: Run Screener
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # Setting universe-limit to 0 scans the entire NSE market (~2,000 stocks).
-          # Showing top 25 candidates prioritized by Breakout status.
-          # Using 1y period for faster execution (sufficient for Trend Template).
+          # Market-wide scan with IST time-awareness and persistent memory.
           python3 swing_screener.py --universe-limit 0 --period 1y --interval 1d --top-n 25
