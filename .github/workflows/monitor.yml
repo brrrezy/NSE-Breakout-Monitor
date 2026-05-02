@@ -27,7 +27,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Restore Watchlist Cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: watchlist_persistent.json
           key: watchlist-${{ github.run_number }}
@@ -39,5 +39,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          # Ensure the file exists so the cache step doesn't throw a warning.
+          touch watchlist_persistent.json
           # Market-wide scan with IST time-awareness and persistent memory.
           python3 swing_screener.py --universe-limit 0 --period 1y --interval 1d --top-n 25

@@ -614,8 +614,10 @@ if __name__ == "__main__":
         priority_symbols = []
         if WATCHLIST_FILE.exists():
             try:
-                priority_symbols = json.loads(WATCHLIST_FILE.read_text())
-                print(f"Loaded {len(priority_symbols)} priority symbols from yesterday.")
+                content = WATCHLIST_FILE.read_text().strip()
+                if content:
+                    priority_symbols = json.loads(content)
+                    print(f"Loaded {len(priority_symbols)} priority symbols from yesterday.")
             except:
                 pass
 
