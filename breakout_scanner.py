@@ -122,6 +122,30 @@ def get_nse_stocks(cache_ttl_hours: int = 24) -> List[str]:
         return []
 
 
+SECTOR_CACHE_FILE = CACHE_DIR / "sectors.json"
+
+def get_sector(sym: str) -> str:
+    """Fetch sector with local caching to avoid API limits."""
+    cache = {}
+    if SECTOR_CACHE_FILE.exists():
+        try:
+            cache = json.loads(SECTOR_CACHE_FILE.read_text())
+        except Exception:
+            pass
+            
+    if sym in cache:
+        return cache[sym]
+        
+    try:
+        info = yf.Ticker(sym).info
+        sector = info.get('sector', 'Unknown')
+        cache[sym] = sector
+        SECTOR_CACHE_FILE.write_text(json.dumps(cache))
+        return sector
+    except Exception:
+        return 'Unknown'
+
+
 # ============================================================
 # 5) TECHNICAL ENGINE
 # ============================================================
@@ -164,6 +188,12 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["delta_proxy"] = (
         ((df["Close"] - df["Low"]) - (df["High"] - df["Close"])) / hl_range
     ) * df["Volume"]
+
+    # Institutional Footprint (Absorption)
+    df["narrow_spread"] = (df["High"] - df["Low"]) < (df["atr"] * 0.8)
+    df["high_vol_acc"] = df["Volume"] > (df["vol_ma50"] * 1.2)
+    df["absorption"] = df["narrow_spread"] & df["high_vol_acc"] & (df["Close"] >= df["Open"])
+    df["accumulation_days"] = df["absorption"].rolling(20).sum()
 
     return df
 
@@ -245,7 +275,18 @@ def detect_vcp_setup(df: pd.DataFrame, lookback: int = 60) -> Tuple[bool, Dict[s
     r3 = w["drp"].iloc[40:60].mean()
     contraction = (r1 > r2 >= r3) or (r1 > r3)
 
-    is_setup = near_highs and (is_tight or tightness_5d) and vol_dry and contraction
+    # 5. Cleanliness Scoring (Tightness 1-10)
+    std_20 = w["Close"].tail(20).std()
+    mean_20 = w["Close"].tail(20).mean()
+    cv = (std_20 / mean_20) * 100 if mean_20 > 0 else 100
+    tightness_score = max(1, min(10, int(12 - cv))) 
+    
+    # Institutional Footprints (Accumulation inside consolidation)
+    accumulation_count = latest.get("accumulation_days", 0)
+    has_footprints = accumulation_count >= 2
+
+    # A very high tightness or clear footprints can override a lack of pure contraction
+    is_setup = near_highs and (is_tight or tightness_5d or tightness_score >= 8 or has_footprints) and vol_dry
 
     details = {
         "near_highs": near_highs,
@@ -253,6 +294,8 @@ def detect_vcp_setup(df: pd.DataFrame, lookback: int = 60) -> Tuple[bool, Dict[s
         "vol_dry": vol_dry,
         "contraction": contraction,
         "pivot_high": float(h52),
+        "tightness_score": tightness_score,
+        "has_footprints": has_footprints,
     }
     return bool(is_setup), details
 
@@ -307,6 +350,40 @@ def calculate_rs_raw(df: pd.DataFrame) -> float:
         )
 
     return float(0.4 * get_ret(63) + 0.2 * get_ret(126) + 0.4 * get_ret(252))
+
+
+def calculate_historical_win_rate(df: pd.DataFrame) -> Tuple[int, int, float]:
+    """Mini-backtest of similar volume breakouts over the past year."""
+    if len(df) < 50:
+        return 0, 0, 0.0
+    
+    df_bt = df.copy()
+    df_bt['prev_high_20'] = df_bt['High'].shift(1).rolling(20).max()
+    df_bt['is_bo'] = (df_bt['Close'] > df_bt['prev_high_20']) & (df_bt['Volume'] > df_bt['vol_ma50'] * 1.5)
+    
+    bo_indices = np.where(df_bt['is_bo'])[0]
+    wins, total = 0, 0
+    
+    for idx in bo_indices:
+        if idx > len(df_bt) - 15:
+            continue # Skip recent breakouts that haven't played out
+        entry_price = df_bt['Close'].iloc[idx]
+        lookahead = df_bt.iloc[idx+1 : min(idx+21, len(df_bt))] # 20 days lookahead
+        
+        target = entry_price * 1.10 # +10% target
+        stop = entry_price * 0.93   # -7% stop loss
+        
+        for _, row in lookahead.iterrows():
+            if row['Low'] <= stop:
+                total += 1
+                break
+            if row['High'] >= target:
+                wins += 1
+                total += 1
+                break
+                
+    win_rate = (wins / total * 100) if total > 0 else 0.0
+    return wins, total, win_rate
 
 
 # ============================================================
@@ -378,6 +455,10 @@ def run_full_system(
                 df = add_technical_indicators(normalize_ohlcv_df(df))
                 latest = df.iloc[-1]
 
+                # Risk/Reward Filter: Skip very expensive stocks (> 5000 INR)
+                if float(latest["Close"]) > 800 and not manual_symbols:
+                    continue
+
                 # Step 1: Filter (Minervini Trend)
                 is_trend = detect_minervini_trend(df)
                 if not is_trend and not manual_symbols:
@@ -403,6 +484,12 @@ def run_full_system(
                 # Confluence score as extra quality check
                 conf_score, conf_sigs = predicta_v4_confluence(latest)
 
+                sector = get_sector(sym) if (is_setup or is_trigger) else "Unknown"
+
+                win_prob = 0.0
+                if is_trigger or is_setup:
+                    _, _, win_prob = calculate_historical_win_rate(df)
+
                 # Build notes for clarity
                 notes = []
                 if is_vcp: notes.append("VCP")
@@ -410,16 +497,21 @@ def run_full_system(
                 if is_ipo: notes.append("IPO Base")
 
                 if is_vcp:
-                    if vcp_details.get("is_tight"): notes.append("Tight")
+                    notes.append(f"Tight:{vcp_details.get('tightness_score', 1)}/10")
+                    if vcp_details.get("has_footprints"): notes.append("Accumulation")
                     if vcp_details.get("vol_dry"): notes.append("Vol Dry")
 
                 if is_trigger:
                     notes.append("BREAKOUT")
+                
+                if win_prob > 0:
+                    notes.append(f"WinProb:{win_prob:.0f}%")
 
                 status = "ACTIONABLE" if (is_setup and is_trigger) else ("WATCHLIST" if is_setup else "TRENDING")
 
                 row = {
                     "Symbol": sym,
+                    "Sector": sector,
                     "Status": status,
                     "Notes": ", ".join(notes) if notes else "Trending",
                     "Price": float(latest["Close"]),
@@ -430,6 +522,8 @@ def run_full_system(
                     "SFP": is_sfp,
                     "IPO_Base": is_ipo,
                     "Breakout": is_trigger,
+                    "WinProb": win_prob,
+                    "TightnessScore": vcp_details.get("tightness_score", 0),
                     "Vol_Dry": vcp_details.get("vol_dry", False),
                     "Tightness": vcp_details.get("is_tight", False),
                     "VolMult": float(latest["vol_mult"]),
@@ -455,8 +549,8 @@ def run_full_system(
     ).astype(int)
 
     top = (
-        df_results.sort_values(by=["Breakout", "VCP_Setup", "Score", "RSRating"], ascending=False)
-        .head(top_n)
+        df_results.sort_values(by=["Breakout", "WinProb", "TightnessScore", "Score"], ascending=False)
+        .head(10) # Enforce maximum of top 10 stocks
         .reset_index(drop=True)
     )
     top.attrs["summary"] = counters
@@ -542,6 +636,7 @@ if __name__ == "__main__":
                             f"💰 Price: ₹{row['Price']:.2f}\n"
                             f"🎯 Pivot: ₹{row['Pivot']:.2f}\n"
                             f"📊 Vol: {row['VolMult']:.1f}x avg\n"
+                            f"🏭 Sector: {row['Sector']}\n"
                             f"📝 Setup: {row['Notes']}"
                         )
                         send_telegram_message(msg)
@@ -551,9 +646,11 @@ if __name__ == "__main__":
                 wl_rows = priority_results[priority_results["Status"].isin(["WATCHLIST", "ACTIONABLE"])]
                 if not wl_rows.empty:
                     lines = []
-                    for _, r in wl_rows.head(15).iterrows():
-                        lines.append(f"{r['Symbol']} {r['Price']:.0f} ({r['Notes']})")
-                    send_telegram_message(f"📋 Watchlist ({len(wl_rows)}):\n\n" + "\n".join(lines))
+                    for _, r in wl_rows.head(10).iterrows():
+                        # Make it professional
+                        prefix = "⭐" if r["WinProb"] >= 65 or r["TightnessScore"] >= 8 else "•"
+                        lines.append(f"{prefix} {r['Symbol']} ₹{r['Price']:.0f} — {r['Notes']}")
+                    send_telegram_message(f"📋 TOP 10 WATCHLIST\n\n" + "\n".join(lines))
 
         # --- 3. Full market scan (always runs) ---
         print("\n🔎 FULL MARKET SCAN...")
@@ -578,6 +675,7 @@ if __name__ == "__main__":
                         f"💰 Price: ₹{row['Price']:.2f}\n"
                         f"🎯 Pivot: ₹{row['Pivot']:.2f}\n"
                         f"📊 Vol: {row['VolMult']:.1f}x avg\n"
+                        f"🏭 Sector: {row['Sector']}\n"
                         f"📝 Setup: {row['Notes']}"
                     )
                     send_telegram_message(msg)
@@ -595,13 +693,24 @@ if __name__ == "__main__":
                 state["watchlist"] = eod_symbols
 
                 if eod_symbols:
+                    # Sector Heatmap Correlation
+                    sectors = combined_eod[combined_eod["Sector"] != "Unknown"]["Sector"]
+                    sector_counts = sectors.value_counts()
+                    hot_sectors = sector_counts[sector_counts >= 2]
+                    
+                    sector_msg = ""
+                    if not hot_sectors.empty:
+                        sector_msg = "\n\n🔥 Hot Sectors:\n" + "\n".join([f"• {s} ({c})" for s, c in hot_sectors.items()])
+
                     summary_lines = []
-                    for _, r in combined_eod.head(20).iterrows():
-                        summary_lines.append(f"{r['Symbol']} {r['Price']:.0f} ({r['Notes']})")
+                    # Limit exactly to 10 for professional conciseness
+                    for _, r in combined_eod.head(10).iterrows():
+                        prefix = "⭐" if r["WinProb"] >= 65 or r["TightnessScore"] >= 8 else "•"
+                        summary_lines.append(f"{prefix} {r['Symbol']} ₹{r['Price']:.0f} — {r['Notes']}")
                     summary = "\n".join(summary_lines)
 
                     send_telegram_message(
-                        f"📋 Watchlist ({len(eod_symbols)}):\n\n{summary}"
+                        f"📋 TOP 10 WATCHLIST\n\n{summary}{sector_msg}"
                     )
                 else:
                     send_telegram_message("🏁 *Market Closed* — No clean setups for tomorrow.")
