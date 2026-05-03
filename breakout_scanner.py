@@ -515,7 +515,7 @@ def run_full_system(
 
     print(f"Scanning {len(stocks)} symbols in chunks...")
     candidates = []
-    chunk_size = 50
+    chunk_size = 200  # Larger chunks = fewer Yahoo round-trips
     is_manual = bool(manual_symbols)
 
     for i in range(0, len(stocks), chunk_size):
@@ -526,7 +526,7 @@ def run_full_system(
                 period=period,
                 interval=interval,
                 group_by="ticker",
-                threads=10,
+                threads=True,
                 progress=False,
             )
         except Exception as e:
@@ -551,7 +551,8 @@ def run_full_system(
             except Exception:
                 continue
 
-        with concurrent.futures.ProcessPoolExecutor() as executor:
+        # ThreadPoolExecutor: no pickle overhead, shares memory
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             futures = {executor.submit(process_ticker, sym, df, is_manual): sym for sym, df in valid_items}
             
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"Chunk {i // chunk_size + 1}"):
