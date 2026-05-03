@@ -456,7 +456,7 @@ def run_full_system(
                 latest = df.iloc[-1]
 
                 # Risk/Reward Filter: Skip very expensive stocks (> 5000 INR)
-                if float(latest["Close"]) > 800 and not manual_symbols:
+                if float(latest["Close"]) > 1000 and not manual_symbols:
                     continue
 
                 # Step 1: Filter (Minervini Trend)
@@ -486,9 +486,12 @@ def run_full_system(
 
                 sector = get_sector(sym) if (is_setup or is_trigger) else "Unknown"
 
-                win_prob = 0.0
+                win_prob_val = 0.0
+                win_total = 0
                 if is_trigger or is_setup:
-                    _, _, win_prob = calculate_historical_win_rate(df)
+                    _, win_total, win_prob_val = calculate_historical_win_rate(df)
+                
+                win_prob_display = f"{win_prob_val:.0f}%" if win_total >= 3 else "NA"
 
                 # Build notes for clarity
                 notes = []
@@ -504,8 +507,7 @@ def run_full_system(
                 if is_trigger:
                     notes.append("BREAKOUT")
                 
-                if win_prob > 0:
-                    notes.append(f"WinProb:{win_prob:.0f}%")
+                notes.append(f"WinProb:{win_prob_display}")
 
                 status = "ACTIONABLE" if (is_setup and is_trigger) else ("WATCHLIST" if is_setup else "TRENDING")
 
@@ -522,7 +524,7 @@ def run_full_system(
                     "SFP": is_sfp,
                     "IPO_Base": is_ipo,
                     "Breakout": is_trigger,
-                    "WinProb": win_prob,
+                    "WinProb": win_prob_val,
                     "TightnessScore": vcp_details.get("tightness_score", 0),
                     "Vol_Dry": vcp_details.get("vol_dry", False),
                     "Tightness": vcp_details.get("is_tight", False),
@@ -549,7 +551,7 @@ def run_full_system(
     ).astype(int)
 
     top = (
-        df_results.sort_values(by=["Breakout", "WinProb", "TightnessScore", "Score"], ascending=False)
+        df_results.sort_values(by=["Breakout", "WinProb", "TightnessScore", "Score", "RSRating"], ascending=False)
         .head(10) # Enforce maximum of top 10 stocks
         .reset_index(drop=True)
     )
@@ -719,7 +721,6 @@ if __name__ == "__main__":
                 existing = set(state.get("watchlist", []))
                 new_wl = set(watchlist["Symbol"].tolist()) if not watchlist.empty else set()
                 state["watchlist"] = list(existing | new_wl)
-
         # --- 5. Save persistent state ---
         state["alerted_today"] = list(alerted_set)
         save_state(state)

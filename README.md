@@ -1,38 +1,48 @@
-# NSE Breakout Scanner
+# NSE Breakout Scanner Pro
 
-A **free, automated breakout detection engine** for NSE stocks, powered by **Mark Minervini's VCP (Volatility Contraction Pattern)** methodology. Runs entirely on GitHub Actions — no servers, no hosting costs.
+A **fully automated, institutional-grade breakout detection engine** for NSE stocks. It combines **Mark Minervini's VCP methodology** with advanced statistical backtesting and volume-price analysis.
 
-## How It Works
+Runs entirely on GitHub Actions — **$0 monthly cost**.
 
-```
-09:10 IST  →  Pre-open: Scan yesterday's watchlist for gap-ups
-09:20 IST  →  Full market scan begins
-Every 20m  →  Re-scan entire NSE for new breakouts
-15:30 IST  →  Final scan → Save tomorrow's watchlist
-```
+## 🚀 Advanced Features
 
-### Detection Pipeline
+### 1. The VCP 2.0 Engine
+*   **Tightness Scoring (1-10):** Uses the math of standard deviation to measure consolidation. A score of `9/10` means the price is coiling like a spring.
+*   **Institutional Footprint (Absorption):** Detects narrow-spread candles on massive volume, identifying "quiet" institutional accumulation before the breakout happens.
+*   **IPO Base & SFP:** Specialized detection for recent listings and Swing Failure Patterns (fake-out reversals).
 
-1. **Trend Filter** — Minervini Stage 2 Template (price > 50 EMA > 150 EMA > 200 EMA)
-2. **Setup Detection** — VCP (tightness + volume drying), SFP (swing failure), IPO Base
-3. **Breakout Trigger** — Price breaks pivot high with 1.5x volume expansion
-4. **Alert** — Instant Telegram notification with price, pivot, and signal details
+### 2. Historical Win-Rate Predictor (WinProb)
+*   Whenever a stock triggers, the engine runs an **on-the-fly mini-backtest** over the last 1 year of that specific stock's history.
+*   It calculates the success rate of similar breakouts reaching a +10% target.
+*   Look for the `⭐` in your alerts for setups with >65% historical win probability.
 
-### Stock Classification
+### 3. Sector Intelligence & Group Moves
+*   **Tailwind Detection:** Identifies the sector for every stock.
+*   **Hot Sector Heatmap:** At the End of Day, the bot groups your watchlist by sector to identify where "smart money" is flowing.
+*   **Group Moves:** Detects when multiple stocks in the same sector (e.g., Chemicals or IT) are breaking out simultaneously—a signal with a much higher success rate.
 
-| Status | Meaning |
+### 4. Smart Risk Management
+*   **Price Filter:** Automatically filters out stocks > ₹5,000 to ensure your swing trading position sizing remains efficient.
+*   **Fakeout Protection:** Only triggers a breakout if the stock shows a "Strong Close" (upper 60% of daily range), avoiding "wick traps."
+
+---
+
+## ⏰ How It Works (IST)
+
+| Time | Event |
 |---|---|
-| `ACTIONABLE` | Breakout confirmed — entry trigger fired |
-| `WATCHLIST` | Setup forming — monitor for breakout |
-| `TRENDING` | In Minervini trend — no setup yet |
+| **09:10** | **Morning Priority:** Scans your watchlist for overnight setups. |
+| **09:15 - 15:30** | **Live Monitor:** Scans every **10 minutes** for new breakouts. |
+| **15:30** | **Market Close:** Final scan → Generates Top 10 Watchlist & Hot Sectors for tomorrow. |
 
-## Setup (5 minutes)
+---
+
+## 🛠 Setup (5 minutes)
 
 ### 1. Create a Telegram Bot
-1. Message [@BotFather](https://t.me/BotFather) on Telegram
-2. Send `/newbot` and follow the prompts
-3. Save the **Bot Token**
-4. Message your bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` to get your **Chat ID**
+1. Message [@BotFather](https://t.me/BotFather) on Telegram.
+2. Send `/newbot` and save the **Bot Token**.
+3. Message your bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your **Chat ID**.
 
 ### 2. Add GitHub Secrets
 Go to your repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
@@ -42,33 +52,17 @@ Go to your repo → **Settings** → **Secrets and variables** → **Actions** �
 | `TELEGRAM_BOT_TOKEN` | Your bot token |
 | `TELEGRAM_CHAT_ID` | Your chat ID |
 
-### 3. Done
-The scanner runs automatically every trading day during NSE market hours.
+---
 
-## Files
+## 📊 Stock Status Guide
 
-| File | Purpose |
+| Status | Meaning |
 |---|---|
-| `breakout_scanner.py` | Core engine — all detection logic |
-| `.github/workflows/nse_breakout_monitor.yml` | GitHub Actions schedule & config |
-| `watchlist_persistent.json` | Auto-managed — carries watchlist between days |
-| `requirements.txt` | Python dependencies |
+| `⭐ ACTIONABLE` | Elite setup + Breakout trigger. High probability of immediate move. |
+| `• WATCHLIST` | High-quality setup forming (VCP/IPO Base). Add to tracking list. |
+| `TRENDING` | In Stage 2 trend. Waiting for price contraction. |
 
-## Manual Test
-
-Trigger a test scan: Go to **Actions** → **NSE Breakout Scanner** → **Run workflow**
-
-Test Telegram connection:
-```bash
-export TELEGRAM_BOT_TOKEN="your_token"
-export TELEGRAM_CHAT_ID="your_chat_id"
-python3 breakout_scanner.py --test-alert
-```
-
-## Cost
-
-**$0**. GitHub Actions Free tier provides 2,000 minutes/month. This scanner uses ~540 minutes/month (~27%).
+---
 
 ## License
-
 MIT
