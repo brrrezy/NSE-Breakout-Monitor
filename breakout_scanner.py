@@ -1,3 +1,11 @@
+"""
+NSE Breakout Scanner Pro — Institutional-Grade Swing Trading Engine
+===================================================================
+Nifty 500 daily + Full universe weekly discovery.
+ATR-based risk management. Market regime awareness.
+Threaded analysis. Telegram alerts.
+"""
+
 import argparse
 import concurrent.futures
 import datetime as dt
@@ -7,7 +15,8 @@ import os
 import sys
 import tempfile
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,47 +28,48 @@ import yfinance as yf
 from tqdm import tqdm
 
 # ============================================================
-# IST TIMEZONE HANDLING
+# CONFIG
 # ============================================================
 
 IST_OFFSET = dt.timedelta(hours=5, minutes=30)
-
-
-def get_now_ist():
-    """Get current time in IST (works on any server timezone)."""
-    return dt.datetime.now(dt.timezone.utc) + IST_OFFSET
-
-
-# ============================================================
-# 1) CONFIG & PATHS
-# ============================================================
-
-_DEFAULT_CACHE_DIR = Path(tempfile.gettempdir()) / "nse_screener_cache"
-CACHE_DIR = Path(os.environ.get("NSE_SCREENER_CACHE_DIR", str(_DEFAULT_CACHE_DIR)))
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_CACHE_DIR = Path(os.environ.get("NSE_SCREENER_CACHE_DIR", str(Path(tempfile.gettempdir()) / "nse_screener_cache")))
+_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_FILE = Path("watchlist_persistent.json")
-NSE_EQUITY_LIST_CACHE = CACHE_DIR / "EQUITY_L.csv"
+NIFTY500_CACHE = _CACHE_DIR / "nifty500.csv"
+FULL_EQUITY_CACHE = _CACHE_DIR / "EQUITY_L.csv"
+SECTOR_CACHE = _CACHE_DIR / "sectors.json"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
+# Strategy constants
+MAX_PRICE = 5000           # Skip stocks above this price for swing sizing
+MIN_DATA_DAYS = 90         # Minimum trading days required
+VOLUME_BREAKOUT_MULT = 1.5 # Volume must be 1.5x average for breakout
+STRONG_CLOSE_PCT = 0.40    # Close must be in top 60% of daily range
+WIN_RATE_MIN_SAMPLES = 3   # Minimum breakout samples for WinProb display
+TIGHTNESS_STAR = 8         # Tightness score threshold for star rating
+WINPROB_STAR = 65          # WinProb threshold for star rating
+DISCOVERY_MIN_SCORE = 8    # Non-Nifty500 stocks must score this high to be promoted
+CHUNK_SIZE = 200           # Stocks per Yahoo download batch
+MAX_WORKERS = 8            # Threads for parallel analysis
+
+
+def get_now_ist():
+    return dt.datetime.now(dt.timezone.utc) + IST_OFFSET
+
 
 # ============================================================
-# 2) PERSISTENT STATE (survives between GitHub Action runs)
+# PERSISTENT STATE
 # ============================================================
 
 def load_state() -> dict:
-    """Load watchlist + alerted-today from persistent JSON."""
-    default = {"watchlist": [], "alerted_today": [], "alerted_date": ""}
+    default = {"watchlist": [], "alerted_today": [], "alerted_date": "", "discovery": [], "discovery_date": ""}
     if not STATE_FILE.exists():
         return default
     try:
-        content = STATE_FILE.read_text().strip()
-        if not content:
-            return default
-        data = json.loads(content)
-        # Handle old format (plain list of symbols)
+        data = json.loads(STATE_FILE.read_text().strip() or "{}")
         if isinstance(data, list):
             return {**default, "watchlist": data}
         return {**default, **data}
@@ -68,90 +78,99 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    """Save state to persistent JSON."""
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
 # ============================================================
-# 3) TELEGRAM
+# TELEGRAM
 # ============================================================
 
-def send_telegram_message(message: str):
-    """Send a message via Telegram bot. Silently fails if keys are missing."""
+def send_telegram(msg: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[Telegram] Skipped — no token/chat_id configured.")
+        print("[TG] Skipped — no credentials.")
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code != 200:
-            print(f"[Telegram] Failed: {resp.status_code} — {resp.text[:200]}")
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            print(f"[TG] {r.status_code}: {r.text[:200]}")
     except Exception as e:
-        print(f"[Telegram] Error: {e}")
+        print(f"[TG] Error: {e}")
 
 
 # ============================================================
-# 4) NSE STOCK UNIVERSE
+# STOCK UNIVERSE
 # ============================================================
 
 def _clean_symbol(raw: str) -> str:
-    """Normalize a raw symbol from NSE CSV to Yahoo format."""
-    return raw.split(',')[0].strip().strip('"').replace('$', '') + ".NS"
+    return raw.split(",")[0].strip().strip('"').replace("$", "") + ".NS"
 
 
-def get_nse_stocks(cache_ttl_hours: int = 24) -> List[str]:
-    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+def _fetch_cached_csv(url: str, cache_path: Path, ttl_hours: int = 24) -> List[str]:
     headers = {"User-Agent": "Mozilla/5.0"}
-
-    if NSE_EQUITY_LIST_CACHE.exists():
-        age = dt.datetime.now() - dt.datetime.fromtimestamp(
-            NSE_EQUITY_LIST_CACHE.stat().st_mtime
-        )
-        if age.total_seconds() < cache_ttl_hours * 3600:
-            text = NSE_EQUITY_LIST_CACHE.read_text(encoding="utf-8", errors="ignore")
-            lines = text.splitlines()
-            return [_clean_symbol(l) for l in lines[1:] if l.strip()]
-
+    if cache_path.exists():
+        age = dt.datetime.now() - dt.datetime.fromtimestamp(cache_path.stat().st_mtime)
+        if age.total_seconds() < ttl_hours * 3600:
+            lines = cache_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            return lines
     try:
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
-        NSE_EQUITY_LIST_CACHE.write_text(resp.text, encoding="utf-8")
-        lines = resp.text.splitlines()
-        return [_clean_symbol(l) for l in lines[1:] if l.strip()]
+        cache_path.write_text(resp.text, encoding="utf-8")
+        return resp.text.splitlines()
     except Exception:
+        if cache_path.exists():
+            return cache_path.read_text(encoding="utf-8", errors="ignore").splitlines()
         return []
 
 
-SECTOR_CACHE_FILE = CACHE_DIR / "sectors.json"
+def get_nifty500() -> List[str]:
+    """Fetch the official Nifty 500 constituent list from NSE."""
+    url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+    lines = _fetch_cached_csv(url, NIFTY500_CACHE)
+    if not lines:
+        return []
+    try:
+        df = pd.read_csv(StringIO("\n".join(lines)))
+        col = "Symbol" if "Symbol" in df.columns else df.columns[2]
+        return [s.strip() + ".NS" for s in df[col].dropna().tolist()]
+    except Exception:
+        return [_clean_symbol(l) for l in lines[1:] if l.strip()]
+
+
+def get_full_universe() -> List[str]:
+    """Fetch the complete NSE equity list (2600+ stocks)."""
+    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+    lines = _fetch_cached_csv(url, FULL_EQUITY_CACHE)
+    return [_clean_symbol(l) for l in lines[1:] if l.strip()]
+
 
 def get_sector(sym: str) -> str:
-    """Fetch sector with local caching to avoid API limits."""
     cache = {}
-    if SECTOR_CACHE_FILE.exists():
+    if SECTOR_CACHE.exists():
         try:
-            cache = json.loads(SECTOR_CACHE_FILE.read_text())
+            cache = json.loads(SECTOR_CACHE.read_text())
         except Exception:
             pass
-            
     if sym in cache:
         return cache[sym]
-        
     try:
-        info = yf.Ticker(sym).info
-        sector = info.get('sector', 'Unknown')
+        sector = yf.Ticker(sym).info.get("sector", "Unknown")
         cache[sym] = sector
-        SECTOR_CACHE_FILE.write_text(json.dumps(cache))
+        SECTOR_CACHE.write_text(json.dumps(cache))
         return sector
     except Exception:
-        return 'Unknown'
+        return "Unknown"
 
 
 # ============================================================
-# 5) TECHNICAL ENGINE
+# TECHNICAL ENGINE
 # ============================================================
 
-def normalize_ohlcv_df(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -159,238 +178,206 @@ def normalize_ohlcv_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
+
     # EMAs
     for p in [8, 21, 50, 150, 200]:
-        df[f"ema{p}"] = ta.trend.ema_indicator(df["Close"], p)
+        df[f"ema{p}"] = ta.trend.ema_indicator(c, p)
 
     # Momentum
-    df["rsi"] = ta.momentum.rsi(df["Close"], 14)
-    macd = ta.trend.MACD(df["Close"])
-    df["macd"] = macd.macd()
-    df["macd_signal"] = macd.macd_signal()
-    df["adx"] = ta.trend.adx(df["High"], df["Low"], df["Close"], 14)
-    df["stoch"] = ta.momentum.stoch(df["High"], df["Low"], df["Close"], 14)
+    df["rsi"] = ta.momentum.rsi(c, 14)
+    macd_obj = ta.trend.MACD(c)
+    df["macd"] = macd_obj.macd()
+    df["macd_sig"] = macd_obj.macd_signal()
+    df["adx"] = ta.trend.adx(h, l, c, 14)
+    df["stoch"] = ta.momentum.stoch(h, l, c, 14)
 
     # Volume
-    df["vol_ma20"] = df["Volume"].rolling(20).mean()
-    df["vol_ma50"] = df["Volume"].rolling(50).mean()
-    df["vol_mult"] = df["Volume"] / df["vol_ma20"]
-    df["rvol50"] = df["Volume"] / df["vol_ma50"]
+    df["vol_ma20"] = v.rolling(20).mean()
+    df["vol_ma50"] = v.rolling(50).mean()
+    df["vol_mult"] = v / df["vol_ma20"]
 
     # Volatility
-    df["atr"] = ta.volatility.average_true_range(df["High"], df["Low"], df["Close"], 14)
-    df["adrp20"] = ((df["High"] - df["Low"]).rolling(20).mean() / df["Close"]) * 100.0
-    df["drp"] = ((df["High"] - df["Low"]) / df["Close"]) * 100.0
+    df["atr"] = ta.volatility.average_true_range(h, l, c, 14)
+    df["adrp"] = ((h - l).rolling(20).mean() / c) * 100
+    df["drp"] = ((h - l) / c) * 100
 
-    # CLV / Delta
-    hl_range = (df["High"] - df["Low"]).replace(0, np.nan)
-    df["delta_proxy"] = (
-        ((df["Close"] - df["Low"]) - (df["High"] - df["Close"])) / hl_range
-    ) * df["Volume"]
+    # Delta proxy (buying vs selling pressure)
+    hl = (h - l).replace(0, np.nan)
+    df["delta"] = ((c - l) - (h - c)) / hl * v
 
-    # Institutional Footprint (Absorption)
-    df["narrow_spread"] = (df["High"] - df["Low"]) < (df["atr"] * 0.8)
-    df["high_vol_acc"] = df["Volume"] > (df["vol_ma50"] * 1.2)
-    df["absorption"] = df["narrow_spread"] & df["high_vol_acc"] & (df["Close"] >= df["Open"])
-    df["accumulation_days"] = df["absorption"].rolling(20).sum()
+    # Institutional absorption: narrow candle + high volume + bullish close
+    df["absorption"] = ((h - l) < df["atr"] * 0.8) & (v > df["vol_ma50"] * 1.2) & (c >= df["Open"])
+    df["accum_days"] = df["absorption"].rolling(20).sum()
 
     return df
 
 
-def predicta_v4_confluence(latest: pd.Series) -> Tuple[int, Dict[str, bool]]:
-    close, ema50, ema200 = (
-        latest.get("Close"),
-        latest.get("ema50"),
-        latest.get("ema200"),
-    )
-    trend_ok = (
-        bool(close > ema50 > ema200) if not pd.isna(ema200) else bool(close > ema50)
-    )
+# ============================================================
+# MARKET REGIME FILTER
+# ============================================================
 
-    signals = {
-        "MACD": bool(latest.get("macd") > latest.get("macd_signal")),
-        "RSI": bool(latest.get("rsi") >= 55),
-        "STOCH": bool(latest.get("stoch") >= 60),
-        "VOLUME": bool(latest.get("vol_mult") >= 1.2),
-        "DELTA": bool(latest.get("delta_proxy", 0) > 0),
-        "TREND": trend_ok,
-        "ADX": bool(latest.get("adx") >= 20),
-        "ATR": bool(latest.get("atr") > 0),
-    }
-    return int(sum(signals.values())), signals
+def check_market_regime() -> Tuple[bool, str]:
+    """Check if Nifty 50 is in a healthy uptrend. Avoids breakout trading in bear markets."""
+    try:
+        nifty = yf.download("^NSEI", period="1y", interval="1d", progress=False)
+        if nifty.empty or len(nifty) < 200:
+            return True, "Unknown"  # If we can't check, assume OK
+        
+        # Flatten MultiIndex if present
+        if isinstance(nifty.columns, pd.MultiIndex):
+            nifty.columns = nifty.columns.get_level_values(0)
+        
+        c = nifty["Close"].iloc[-1]
+        ema50 = ta.trend.ema_indicator(nifty["Close"], 50).iloc[-1]
+        ema200 = ta.trend.ema_indicator(nifty["Close"], 200).iloc[-1]
+
+        if c > ema50 > ema200:
+            return True, "Bull"
+        elif c > ema200:
+            return True, "Neutral"
+        else:
+            return False, "Bear"
+    except Exception:
+        return True, "Unknown"
 
 
-def detect_minervini_trend(df: pd.DataFrame) -> bool:
+# ============================================================
+# SETUP DETECTION
+# ============================================================
+
+def confluence_score(latest: pd.Series) -> int:
+    c = latest.get("Close", 0)
+    e50 = latest.get("ema50", 0)
+    e200 = latest.get("ema200", 0)
+    trend = bool(c > e50 > e200) if not pd.isna(e200) else bool(c > e50)
+
+    checks = [
+        latest.get("macd", 0) > latest.get("macd_sig", 0),
+        latest.get("rsi", 0) >= 55,
+        latest.get("stoch", 0) >= 60,
+        latest.get("vol_mult", 0) >= 1.2,
+        latest.get("delta", 0) > 0,
+        trend,
+        latest.get("adx", 0) >= 20,
+    ]
+    return sum(bool(x) for x in checks)
+
+
+def detect_minervini(df: pd.DataFrame) -> bool:
     if len(df) < 200:
         return False
-    c, e50, e150, e200 = (
-        df["Close"].iloc[-1],
-        df["ema50"].iloc[-1],
-        df["ema150"].iloc[-1],
-        df["ema200"].iloc[-1],
-    )
+    c = df["Close"].iloc[-1]
+    e50, e150, e200 = df["ema50"].iloc[-1], df["ema150"].iloc[-1], df["ema200"].iloc[-1]
+    e200_prev = df["ema200"].iloc[-20]
     h52, l52 = df["High"].tail(252).max(), df["Low"].tail(252).min()
-    e200_1m = df["ema200"].iloc[-20] if len(df) >= 20 else e200
 
-    conds = [
+    return all([
         c > e150 > e200,
-        e200 > e200_1m,
-        e50 > e150,
-        e50 > e200,
+        e200 > e200_prev,
+        e50 > e150 > e200,
         c > e50,
         c >= l52 * 1.3,
         c >= h52 * 0.75,
-    ]
-    return all(conds)
+    ])
 
 
-def detect_vcp_setup(df: pd.DataFrame, lookback: int = 60) -> Tuple[bool, Dict[str, Any]]:
-    """
-    Detects VCP Setup (Watchlist phase):
-    - Price tightening (volatility contraction)
-    - Volume drying up
-    - Holding near recent highs
-    """
-    if len(df) < lookback:
+def detect_vcp(df: pd.DataFrame) -> Tuple[bool, Dict[str, Any]]:
+    """VCP: Volatility Contraction Pattern with tightness scoring and footprint detection."""
+    if len(df) < 60:
         return False, {}
 
-    w = df.tail(lookback)
+    w = df.tail(60)
     latest = w.iloc[-1]
+    pivot = float(w["High"].max())
 
-    # 1. Near Highs Filter (Already in trend, but double check)
-    h52 = w["High"].max()
-    near_highs = latest["Close"] >= h52 * 0.90  # Within 10% of consolidation high
-
-    # 2. Tightness (Calmness)
-    is_tight = latest["drp"] < latest["adrp20"] * 0.8
-    tightness_5d = w["Close"].tail(5).std() / latest["Close"] < 0.015
-
-    # 3. Volume Drying
+    near_highs = latest["Close"] >= pivot * 0.90
     vol_dry = w["Volume"].tail(3).mean() < latest["vol_ma50"] * 0.8
 
-    # 4. Volatility Contraction (Behavioral)
-    r1 = w["drp"].iloc[:20].mean()
-    r2 = w["drp"].iloc[20:40].mean()
-    r3 = w["drp"].iloc[40:60].mean()
-    contraction = (r1 > r2 >= r3) or (r1 > r3)
+    # Tightness score (1-10) from coefficient of variation
+    std20 = w["Close"].tail(20).std()
+    mean20 = w["Close"].tail(20).mean()
+    cv = (std20 / mean20) * 100 if mean20 > 0 else 100
+    tightness = max(1, min(10, int(12 - cv)))
 
-    # 5. Cleanliness Scoring (Tightness 1-10)
-    std_20 = w["Close"].tail(20).std()
-    mean_20 = w["Close"].tail(20).mean()
-    cv = (std_20 / mean_20) * 100 if mean_20 > 0 else 100
-    tightness_score = max(1, min(10, int(12 - cv))) 
-    
-    # Institutional Footprints (Accumulation inside consolidation)
-    accumulation_count = latest.get("accumulation_days", 0)
-    has_footprints = accumulation_count >= 2
+    # Institutional footprints
+    footprints = int(latest.get("accum_days", 0)) >= 2
 
-    # A very high tightness or clear footprints can override a lack of pure contraction
-    is_setup = near_highs and (is_tight or tightness_5d or tightness_score >= 8 or has_footprints) and vol_dry
+    is_setup = near_highs and vol_dry and (tightness >= 6 or footprints)
 
-    details = {
-        "near_highs": near_highs,
-        "is_tight": is_tight,
+    return bool(is_setup), {
+        "pivot_high": pivot,
+        "tightness_score": tightness,
         "vol_dry": vol_dry,
-        "contraction": contraction,
-        "pivot_high": float(h52),
-        "tightness_score": tightness_score,
-        "has_footprints": has_footprints,
+        "has_footprints": footprints,
     }
-    return bool(is_setup), details
 
 
-def detect_breakout_trigger(df: pd.DataFrame, pivot_high: float) -> Tuple[bool, Dict[str, Any]]:
-    """
-    Detects Breakout Trigger (Entry phase):
-    - Price breaking above pivot/resistance
-    - Volume expansion
-    - Strong close to avoid fakes
-    """
-    latest = df.iloc[-1]
-
-    # Breakout condition
-    price_break = latest["Close"] > pivot_high
-    # Conviction: Volume > 1.5x 50-day average OR 1.5x 20-day average
-    vol_conviction = (latest["Volume"] > latest["vol_ma50"] * 1.5) or (latest["vol_mult"] > 1.5)
-
-    # Fakeout protection: close should be in the top 60% of the daily range
-    # This filters out bad wicks but isn't too rigid to cause missed trades.
-    daily_range = latest["High"] - latest["Low"]
-    strong_close = True
-    if daily_range > 0:
-        strong_close = latest["Close"] >= (latest["Low"] + daily_range * 0.4)
-
-    is_trigger = price_break and vol_conviction and strong_close
-
-    return bool(is_trigger), {"price_break": price_break, "vol_conviction": vol_conviction, "strong_close": strong_close}
-
-
-def detect_swing_failure(df: pd.DataFrame, lookback: int = 20) -> bool:
-    if len(df) < lookback + 2:
+def detect_sfp(df: pd.DataFrame) -> bool:
+    """Swing Failure Pattern: false breakdown followed by bullish reversal."""
+    if len(df) < 22:
         return False
-    swing_low = float(df.iloc[-(lookback + 1) : -1]["Low"].min())
+    swing_low = float(df.iloc[-21:-1]["Low"].min())
     last = df.iloc[-1]
-    return bool(
-        (last["Low"] < swing_low)
-        and (last["Close"] > swing_low)
-        and (last["Close"] > last["Open"])
-    )
+    return bool(last["Low"] < swing_low and last["Close"] > swing_low and last["Close"] > last["Open"])
 
 
-def detect_ipo_base(df: pd.DataFrame) -> bool:
-    """Proxy: stock has < 1 year of trading data. No API call needed."""
-    return len(df) < 252
+def detect_breakout(df: pd.DataFrame, pivot: float) -> bool:
+    """Price breaks pivot on volume with strong close (fakeout protection)."""
+    latest = df.iloc[-1]
+    price_break = latest["Close"] > pivot
+    vol_ok = latest["Volume"] > latest["vol_ma50"] * VOLUME_BREAKOUT_MULT or latest["vol_mult"] > VOLUME_BREAKOUT_MULT
+
+    rng = latest["High"] - latest["Low"]
+    strong_close = latest["Close"] >= (latest["Low"] + rng * STRONG_CLOSE_PCT) if rng > 0 else True
+
+    return bool(price_break and vol_ok and strong_close)
 
 
-def calculate_rs_raw(df: pd.DataFrame) -> float:
-    def get_ret(p):
-        return (
-            (df["Close"].iloc[-1] / df["Close"].iloc[-p - 1] - 1) if len(df) > p else 0
-        )
-
-    return float(0.4 * get_ret(63) + 0.2 * get_ret(126) + 0.4 * get_ret(252))
+def calc_rs(df: pd.DataFrame) -> float:
+    def ret(p):
+        return (df["Close"].iloc[-1] / df["Close"].iloc[-p - 1] - 1) if len(df) > p else 0
+    return float(0.4 * ret(63) + 0.2 * ret(126) + 0.4 * ret(252))
 
 
-def calculate_historical_win_rate(df: pd.DataFrame) -> Tuple[int, int, float]:
-    """Mini-backtest of similar volume breakouts over the past year."""
+def calc_win_rate(df: pd.DataFrame) -> Tuple[int, float]:
+    """Mini-backtest: how often did similar breakouts hit +10% before -7% stop."""
     if len(df) < 50:
-        return 0, 0, 0.0
-    
-    df_bt = df.copy()
-    df_bt['prev_high_20'] = df_bt['High'].shift(1).rolling(20).max()
-    df_bt['is_bo'] = (df_bt['Close'] > df_bt['prev_high_20']) & (df_bt['Volume'] > df_bt['vol_ma50'] * 1.5)
-    
-    bo_indices = np.where(df_bt['is_bo'])[0]
+        return 0, 0.0
+    prev_h20 = df["High"].shift(1).rolling(20).max()
+    bo_mask = (df["Close"] > prev_h20) & (df["Volume"] > df["vol_ma50"] * VOLUME_BREAKOUT_MULT)
+    bo_idx = np.where(bo_mask)[0]
+
     wins, total = 0, 0
-    
-    for idx in bo_indices:
-        if idx > len(df_bt) - 15:
-            continue # Skip recent breakouts that haven't played out
-        entry_price = df_bt['Close'].iloc[idx]
-        lookahead = df_bt.iloc[idx+1 : min(idx+21, len(df_bt))] # 20 days lookahead
-        
-        target = entry_price * 1.10 # +10% target
-        stop = entry_price * 0.93   # -7% stop loss
-        
-        for _, row in lookahead.iterrows():
-            if row['Low'] <= stop:
+    for idx in bo_idx:
+        if idx > len(df) - 15:
+            continue
+        entry = df["Close"].iloc[idx]
+        ahead = df.iloc[idx + 1: min(idx + 21, len(df))]
+        for _, row in ahead.iterrows():
+            if row["Low"] <= entry * 0.93:
                 total += 1
                 break
-            if row['High'] >= target:
+            if row["High"] >= entry * 1.10:
                 wins += 1
                 total += 1
                 break
-                
-    win_rate = (wins / total * 100) if total > 0 else 0.0
-    return wins, total, win_rate
+    return total, (wins / total * 100) if total > 0 else 0.0
+
+
+def calc_risk_reward(price: float, pivot: float, atr: float) -> Tuple[float, float, float]:
+    """ATR-based stop loss and target. Returns (stop, target, rr_ratio)."""
+    stop = price - (atr * 2)       # 2 ATR stop
+    target = price + (atr * 4)     # 4 ATR target = 2:1 R:R minimum
+    rr = (target - price) / (price - stop) if price > stop else 0
+    return round(stop, 2), round(target, 2), round(rr, 1)
 
 
 # ============================================================
-# 6) CORE ENGINE
+# CORE ENGINE
 # ============================================================
-
 
 @dataclass
 class Candidate:
@@ -401,216 +388,217 @@ class Candidate:
     details: Dict[str, Any]
 
 
-def process_ticker(sym: str, df: pd.DataFrame, is_manual: bool) -> Dict[str, Any]:
+def analyze_ticker(sym: str, df: pd.DataFrame, is_manual: bool) -> Optional[Candidate]:
+    """Analyze a single ticker. Returns Candidate or None."""
     try:
-        df = add_technical_indicators(normalize_ohlcv_df(df))
+        df = add_indicators(normalize_df(df))
         latest = df.iloc[-1]
+        price = float(latest["Close"])
 
-        # Risk/Reward Filter: Skip very expensive stocks (> 1000 INR)
-        if float(latest["Close"]) > 1000 and not is_manual:
-            return {"status": "skipped"}
+        if price > MAX_PRICE and not is_manual:
+            return None
 
-        # Step 1: Filter (Minervini Trend)
-        is_trend = detect_minervini_trend(df)
+        is_trend = detect_minervini(df)
         if not is_trend and not is_manual:
-            return {"status": "skipped"}
+            return None
 
-        # Step 2: Setup (Watchlist)
-        is_vcp, vcp_details = detect_vcp_setup(df)
-        is_sfp = detect_swing_failure(df)
-        is_ipo = detect_ipo_base(df)  # Uses df length — no API call
-
+        is_vcp, vcp = detect_vcp(df)
+        is_sfp = detect_sfp(df)
+        is_ipo = len(df) < 252
         is_setup = is_vcp or is_sfp or is_ipo
 
-        # Step 3: Trigger (Entry)
-        is_trigger = False
-        trigger_details = {}
-        pivot_high = vcp_details.get("pivot_high", float(df["High"].tail(20).max()))
+        pivot = vcp.get("pivot_high", float(df["High"].tail(20).max()))
+        is_breakout = detect_breakout(df, pivot) if is_setup else False
 
-        if is_setup:
-            is_trigger, trigger_details = detect_breakout_trigger(df, pivot_high)
+        score = confluence_score(latest) + (5 if is_breakout else (2 if is_setup else 0))
+        sector = get_sector(sym) if is_setup else "Unknown"
 
-        # Confluence score as extra quality check
-        conf_score, conf_sigs = predicta_v4_confluence(latest)
+        # Win probability
+        total_bo, win_pct = calc_win_rate(df) if is_setup else (0, 0.0)
+        win_display = f"{win_pct:.0f}%" if total_bo >= WIN_RATE_MIN_SAMPLES else "NA"
 
-        sector = get_sector(sym) if (is_setup or is_trigger) else "Unknown"
+        # Risk/Reward
+        atr = float(latest["atr"])
+        stop, target, rr = calc_risk_reward(price, pivot, atr)
 
-        win_prob_val = 0.0
-        win_total = 0
-        if is_trigger or is_setup:
-            _, win_total, win_prob_val = calculate_historical_win_rate(df)
-        
-        win_prob_display = f"{win_prob_val:.0f}%" if win_total >= 3 else "NA"
-
-        # Build notes for clarity
+        # Notes (ultra-compact for Telegram)
         notes = []
-        if is_vcp: notes.append("VCP")
-        if is_sfp: notes.append("SFP")
-        if is_ipo: notes.append("IPO Base")
-
         if is_vcp:
-            notes.append(f"Tight:{vcp_details.get('tightness_score', 1)}/10")
-            if vcp_details.get("has_footprints"): notes.append("Accumulation")
-            if vcp_details.get("vol_dry"): notes.append("Vol Dry")
+            notes.append("VCP")
+            notes.append(f"T:{vcp.get('tightness_score', 1)}")
+            if vcp.get("has_footprints"):
+                notes.append("Accum")
+        if is_sfp:
+            notes.append("SFP")
+        if is_ipo:
+            notes.append("IPO")
+        notes.append(f"W:{win_display}")
 
-        if is_trigger:
-            notes.append("BREAKOUT")
-        
-        notes.append(f"WinProb:{win_prob_display}")
+        status = "ACTIONABLE" if (is_setup and is_breakout) else ("WATCHLIST" if is_setup else "TRENDING")
 
-        status = "ACTIONABLE" if (is_setup and is_trigger) else ("WATCHLIST" if is_setup else "TRENDING")
-
-        row = {
-            "Symbol": sym,
-            "Sector": sector,
-            "Status": status,
-            "Notes": ", ".join(notes) if notes else "Trending",
-            "Price": float(latest["Close"]),
-            "Pivot": float(pivot_high),
-            "Score": conf_score + (5 if is_trigger else (2 if is_setup else 0)),
-            "Minervini": is_trend,
-            "VCP_Setup": is_vcp,
-            "SFP": is_sfp,
-            "IPO_Base": is_ipo,
-            "Breakout": is_trigger,
-            "WinProb": win_prob_val,
-            "TightnessScore": vcp_details.get("tightness_score", 0),
-            "Vol_Dry": vcp_details.get("vol_dry", False),
-            "Tightness": vcp_details.get("is_tight", False),
+        return Candidate(sym, score, price, calc_rs(df), {
+            "Symbol": sym, "Sector": sector, "Status": status,
+            "Notes": ", ".join(notes),
+            "Price": price, "Pivot": round(pivot, 2),
+            "Stop": stop, "Target": target, "RR": rr,
+            "Score": score,
+            "VCP": is_vcp, "SFP": is_sfp, "IPO": is_ipo,
+            "Breakout": is_breakout,
+            "WinProb": win_pct if total_bo >= WIN_RATE_MIN_SAMPLES else 0.0,
+            "TightnessScore": vcp.get("tightness_score", 0),
             "VolMult": float(latest["vol_mult"]),
             "RSI": float(latest["rsi"]),
-            "ADR%": float(latest["adrp20"]),
-            **{f"C_{k}": v for k, v in conf_sigs.items()},
-        }
-        return {
-            "status": "success",
-            "candidate": Candidate(sym, row["Score"], row["Price"], calculate_rs_raw(df), row)
-        }
+        })
     except Exception:
-        return {"status": "error"}
+        return None
 
-def run_full_system(
-    universe_limit: int = 0,
-    min_confluence_score: int = 6,
+
+def scan_universe(
+    symbols: List[str],
     period: str = "1y",
     interval: str = "1d",
-    top_n: int = 25,
-    start_index: int = 0,
-    manual_symbols: Optional[List[str]] = None,
+    is_manual: bool = False,
 ) -> pd.DataFrame:
-    if manual_symbols:
-        stocks = [s.upper().strip() for s in manual_symbols if s.strip()]
-    else:
-        all_stocks = get_nse_stocks()
-        stocks = all_stocks[
-            start_index : start_index + (universe_limit or len(all_stocks))
-        ]
-
-    counters = {
-        "total_universe": len(stocks),
-        "scanned": 0,
-        "passed_filter": 0,
-        "errors": 0,
-    }
-
-    print(f"Scanning {len(stocks)} symbols in chunks...")
+    """Download and analyze a list of symbols. Returns sorted top 10 DataFrame."""
+    print(f"  Scanning {len(symbols)} symbols...")
     candidates = []
-    chunk_size = 200  # Larger chunks = fewer Yahoo round-trips
-    is_manual = bool(manual_symbols)
+    errors = 0
 
-    for i in range(0, len(stocks), chunk_size):
-        chunk = stocks[i : i + chunk_size]
+    for i in range(0, len(symbols), CHUNK_SIZE):
+        chunk = symbols[i: i + CHUNK_SIZE]
         try:
-            bulk_df = yf.download(
-                tickers=" ".join(chunk),
-                period=period,
-                interval=interval,
-                group_by="ticker",
-                threads=True,
-                progress=False,
-            )
+            bulk = yf.download(" ".join(chunk), period=period, interval=interval,
+                               group_by="ticker", threads=True, progress=False)
         except Exception as e:
-            print(f"Chunk download failed: {e}")
-            bulk_df = pd.DataFrame()
+            print(f"  Download failed: {e}")
+            continue
 
-        valid_items = []
-        is_multi = isinstance(bulk_df.columns, pd.MultiIndex)
+        # Extract valid DataFrames
+        items = []
+        is_multi = isinstance(bulk.columns, pd.MultiIndex)
         for sym in chunk:
             try:
                 if is_multi:
-                    if sym not in bulk_df.columns.levels[0]:
+                    if sym not in bulk.columns.levels[0]:
                         continue
-                    df = bulk_df[sym].dropna(how="all").copy()
+                    df = bulk[sym].dropna(how="all").copy()
                 else:
-                    if bulk_df.empty:
+                    if bulk.empty:
                         continue
-                    df = bulk_df.dropna(how="all").copy()
-                
-                if len(df) >= 90:
-                    valid_items.append((sym, df))
+                    df = bulk.dropna(how="all").copy()
+                if len(df) >= MIN_DATA_DAYS:
+                    items.append((sym, df))
             except Exception:
                 continue
 
-        # ThreadPoolExecutor: no pickle overhead, shares memory
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(process_ticker, sym, df, is_manual): sym for sym, df in valid_items}
-            
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"Chunk {i // chunk_size + 1}"):
-                counters["scanned"] += 1
+        # Parallel analysis
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {pool.submit(analyze_ticker, s, d, is_manual): s for s, d in items}
+            for f in tqdm(concurrent.futures.as_completed(futures), total=len(futures),
+                          desc=f"  Chunk {i // CHUNK_SIZE + 1}"):
                 try:
-                    res = future.result()
-                    if res["status"] == "success":
-                        counters["passed_filter"] += 1
-                        candidates.append(res["candidate"])
-                    elif res["status"] == "error":
-                        counters["errors"] += 1
+                    result = f.result()
+                    if result:
+                        candidates.append(result)
                 except Exception:
-                    counters["errors"] += 1
+                    errors += 1
 
-        del bulk_df
+        del bulk
         gc.collect()
 
     if not candidates:
         return pd.DataFrame()
 
-    df_results = pd.DataFrame([c.details for c in candidates])
-    df_results["RSRating"] = (
-        pd.Series([c.rs_raw for c in candidates]).rank(pct=True) * 99
-    ).astype(int)
+    df_out = pd.DataFrame([c.details for c in candidates])
+    df_out["RSRating"] = pd.Series([c.rs_raw for c in candidates]).rank(pct=True).mul(99).astype(int)
 
-    top = (
-        df_results.sort_values(by=["Breakout", "WinProb", "TightnessScore", "Score", "RSRating"], ascending=False)
-        .head(10) # Enforce maximum of top 10 stocks
+    return (
+        df_out
+        .sort_values(["Breakout", "WinProb", "TightnessScore", "Score", "RSRating"], ascending=False)
+        .head(10)
         .reset_index(drop=True)
     )
-    top.attrs["summary"] = counters
-
-    print("\n" + "=" * 50)
-    print(f" TOP {top_n} CANDIDATES ")
-    print("=" * 50)
-    if not top.empty:
-        show_cols = ["Symbol", "Status", "Notes", "Price", "Score", "VCP_Setup", "Breakout", "VolMult"]
-        print(top[show_cols].to_string(index=False))
-    else:
-        print("No candidates found.")
-    print("=" * 50 + "\n")
-
-    return top
 
 
 # ============================================================
-# 7) MAIN — GitHub Actions Entry Point
+# ALERT FORMATTING
+# ============================================================
+
+def _short(sym: str) -> str:
+    """Strip .NS suffix for cleaner display."""
+    return sym.replace(".NS", "")
+
+
+def fmt_breakout(row) -> str:
+    s = _short(row['Symbol'])
+    # Build a human-readable "why" line
+    why_parts = []
+    notes = row.get("Notes", "")
+    if "VCP" in notes:
+        t = row.get("TightnessScore", 0)
+        why_parts.append(f"VCP base, coiled tight ({t}/10)")
+    if "Accum" in notes:
+        why_parts.append("institutions accumulating")
+    if "SFP" in notes:
+        why_parts.append("swing failure reversal")
+    if "IPO" in notes:
+        why_parts.append("IPO base breakout")
+    why = ", ".join(why_parts) if why_parts else "clean setup"
+
+    win = notes.split("W:")[1].split(",")[0].split(")")[0].strip() if "W:" in notes else "NA"
+    win_line = f"{win} similar setups worked" if win != "NA" else "new pattern, no history"
+
+    return (
+        f"*{s}*\n"
+        f"BREAKOUT CONFIRMED\n\n"
+        f"Entry: {row['Price']:.0f}\n"
+        f"Stop: {row['Stop']:.0f} | Target: {row['Target']:.0f}\n"
+        f"R:R {row['RR']}:1 | Vol {row['VolMult']:.1f}x\n\n"
+        f"Why: {why}\n"
+        f"Win rate: {win_line}\n"
+        f"Sector: {row['Sector']}"
+    )
+
+
+def fmt_watchlist(df: pd.DataFrame, title: str = "WATCHLIST") -> str:
+    lines = []
+    for _, r in df.head(10).iterrows():
+        s = _short(r['Symbol'])
+        star = ">" if r.get("WinProb", 0) >= WINPROB_STAR or r.get("TightnessScore", 0) >= TIGHTNESS_STAR else "-"
+        lines.append(f"{star} {s} {r['Price']:.0f}\n  {r['Notes']}")
+    return f"*{title}*\n\n" + "\n\n".join(lines)
+
+
+def fmt_discovery(df: pd.DataFrame) -> str:
+    lines = []
+    for _, r in df.head(5).iterrows():
+        s = _short(r['Symbol'])
+        notes = r.get("Notes", "")
+        # Human-readable description
+        desc_parts = []
+        if "VCP" in notes:
+            t = r.get("TightnessScore", 0)
+            desc_parts.append(f"tight base ({t}/10)")
+        if "Accum" in notes:
+            desc_parts.append("smart money entering")
+        if "SFP" in notes:
+            desc_parts.append("reversal pattern")
+        if "IPO" in notes:
+            desc_parts.append("new listing, building base")
+        desc = ", ".join(desc_parts) if desc_parts else "forming setup"
+        lines.append(f"{s} {r['Price']:.0f}\n  {desc}")
+    return "*HIDDEN GEMS THIS WEEK*\n\n" + "\n\n".join(lines)
+
+
+# ============================================================
+# MAIN
 # ============================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(description="NSE Swing Screener — GitHub Actions Workflow Engine")
-    p.add_argument("--universe-limit", type=int, default=0, help="0 = scan all NSE stocks")
-    p.add_argument("--min-score", type=int, default=6)
-    p.add_argument("--period", type=str, default="1y")
-    p.add_argument("--interval", type=str, default="1d")
-    p.add_argument("--top-n", type=int, default=25)
-    p.add_argument("--start-index", type=int, default=0)
-    p.add_argument("--test-alert", action="store_true", help="Send a test Telegram message and exit")
+    p = argparse.ArgumentParser(description="NSE Breakout Scanner Pro")
+    p.add_argument("--period", default="1y")
+    p.add_argument("--interval", default="1d")
+    p.add_argument("--test-alert", action="store_true")
     return p.parse_args()
 
 
@@ -619,147 +607,115 @@ if __name__ == "__main__":
         args = parse_args()
 
         if args.test_alert:
-            print("Sending test alert to Telegram...")
-            send_telegram_message("🔔 *Test Alert*: Your NSE Screener is connected! 🚀")
-            print("Done. Check your phone!")
+            send_telegram("*Test Alert*: Scanner connected.")
             sys.exit(0)
 
-        # --- 1. Load persistent state ---
         state = load_state()
-        today_str = get_now_ist().strftime("%Y-%m-%d")
+        now = get_now_ist()
+        today = now.strftime("%Y-%m-%d")
 
-        # Reset alerted set if it's a new day
-        if state.get("alerted_date") != today_str:
+        # Day reset
+        if state.get("alerted_date") != today:
             state["alerted_today"] = []
-            state["alerted_date"] = today_str
+            state["alerted_date"] = today
 
-        alerted_set = set(state["alerted_today"])
-        priority_symbols = state.get("watchlist", [])
-        now_ist = get_now_ist()
+        # Weekly discovery reset (Monday)
+        if now.weekday() == 0 and state.get("discovery_date") != today:
+            state["discovery"] = []
+            state["discovery_date"] = today
 
-        print(f"⏰ Current IST: {now_ist.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"📋 Watchlist from previous session: {len(priority_symbols)} stocks")
-        print(f"🚫 Already alerted today: {len(alerted_set)} stocks")
+        alerted = set(state["alerted_today"])
+        discovery_syms = state.get("discovery", [])
+        print(f"IST: {now.strftime('%Y-%m-%d %H:%M')} | Watchlist: {len(state['watchlist'])} | Discovery: {len(discovery_syms)}")
 
-        send_telegram_message(f"🔄 *Scan Started* — {now_ist.strftime('%H:%M IST')}")
+        # --- Market Regime Check ---
+        regime_ok, regime = check_market_regime()
+        print(f"Market Regime: {regime}")
+        if not regime_ok:
+            send_telegram(f"*Market Regime: {regime}*\nBreakout quality is low in bear markets. Scanning with caution.")
 
-        # --- 2. Morning priority scan (fast, watchlist only) ---
-        is_morning = now_ist.hour == 9 and 10 <= now_ist.minute <= 59
+        # --- Build scan universe ---
+        nifty500 = get_nifty500()
+        scan_symbols = list(set(nifty500 + discovery_syms + state.get("watchlist", [])))
+        print(f"Daily Universe: {len(scan_symbols)} (N500: {len(nifty500)}, Discovery: {len(discovery_syms)})")
 
-        if is_morning and priority_symbols:
-            print(f"\n⚡ MORNING PRIORITY: Scanning {len(priority_symbols)} watchlist stocks...")
-            send_telegram_message(f"🌅 *Morning Priority*: Checking {len(priority_symbols)} watchlist stocks...")
+        # --- Morning Priority (09:10-09:59 IST) ---
+        is_morning = now.hour == 9 and 10 <= now.minute <= 59
+        if is_morning and state.get("watchlist"):
+            print("\nMORNING PRIORITY SCAN...")
+            priority = scan_universe(state["watchlist"], args.period, args.interval, is_manual=True)
+            if not priority.empty:
+                for _, row in priority.iterrows():
+                    if row["Status"] == "ACTIONABLE" and row["Symbol"] not in alerted:
+                        send_telegram(fmt_breakout(row))
+                        alerted.add(row["Symbol"])
+                wl = priority[priority["Status"].isin(["WATCHLIST", "ACTIONABLE"])]
+                if not wl.empty:
+                    send_telegram(fmt_watchlist(wl, "MORNING WATCHLIST"))
 
-            priority_results = run_full_system(
-                min_confluence_score=args.min_score,
-                period=args.period,
-                interval=args.interval,
-                top_n=len(priority_symbols),
-                manual_symbols=priority_symbols,
-            )
-
-            if not priority_results.empty:
-                for _, row in priority_results.iterrows():
-                    if row["Status"] == "ACTIONABLE" and row["Symbol"] not in alerted_set:
-                        msg = (
-                            f"🔥 *BREAKOUT: {row['Symbol']}*\n"
-                            f"💰 Price: ₹{row['Price']:.2f}\n"
-                            f"🎯 Pivot: ₹{row['Pivot']:.2f}\n"
-                            f"📊 Vol: {row['VolMult']:.1f}x avg\n"
-                            f"🏭 Sector: {row['Sector']}\n"
-                            f"📝 Setup: {row['Notes']}"
-                        )
-                        send_telegram_message(msg)
-                        alerted_set.add(row["Symbol"])
-
-                # Send morning watchlist update
-                wl_rows = priority_results[priority_results["Status"].isin(["WATCHLIST", "ACTIONABLE"])]
-                if not wl_rows.empty:
-                    lines = []
-                    for _, r in wl_rows.head(10).iterrows():
-                        # Make it professional
-                        prefix = "⭐" if r["WinProb"] >= 65 or r["TightnessScore"] >= 8 else "•"
-                        lines.append(f"{prefix} {r['Symbol']} ₹{r['Price']:.0f} — {r['Notes']}")
-                    send_telegram_message(f"📋 TOP 10 WATCHLIST\n\n" + "\n".join(lines))
-
-        # --- 3. Full market scan (always runs) ---
-        print("\n🔎 FULL MARKET SCAN...")
-        results = run_full_system(
-            universe_limit=args.universe_limit,
-            min_confluence_score=args.min_score,
-            period=args.period,
-            interval=args.interval,
-            top_n=args.top_n,
-            start_index=args.start_index,
-        )
+        # --- Main Scan ---
+        print("\nMAIN SCAN...")
+        results = scan_universe(scan_symbols, args.period, args.interval)
 
         if not results.empty:
             actionable = results[results["Status"] == "ACTIONABLE"]
             watchlist = results[results["Status"] == "WATCHLIST"]
 
-            # Send breakout alerts (skip already-alerted)
             for _, row in actionable.iterrows():
-                if row["Symbol"] not in alerted_set:
-                    msg = (
-                        f"🔥 *BREAKOUT: {row['Symbol']}*\n"
-                        f"💰 Price: ₹{row['Price']:.2f}\n"
-                        f"🎯 Pivot: ₹{row['Pivot']:.2f}\n"
-                        f"📊 Vol: {row['VolMult']:.1f}x avg\n"
-                        f"🏭 Sector: {row['Sector']}\n"
-                        f"📝 Setup: {row['Notes']}"
-                    )
-                    send_telegram_message(msg)
-                    alerted_set.add(row["Symbol"])
+                if row["Symbol"] not in alerted:
+                    send_telegram(fmt_breakout(row))
+                    alerted.add(row["Symbol"])
 
-            # --- 4. EOD check (evaluated AFTER scan) ---
-            now_ist = get_now_ist()
-            is_eod = now_ist.hour >= 15 and now_ist.minute >= 20
+            # --- EOD (after 15:20 IST) ---
+            now = get_now_ist()
+            if now.hour >= 15 and now.minute >= 20:
+                print("\nEND OF DAY...")
+                combined = pd.concat([watchlist, actionable]).drop_duplicates(subset=["Symbol"])
+                state["watchlist"] = combined["Symbol"].tolist()
 
-            if is_eod:
-                print("🏁 END OF DAY — Generating tomorrow's watchlist...")
-                combined_eod = pd.concat([watchlist, actionable]).drop_duplicates(subset=["Symbol"])
-                eod_symbols = combined_eod["Symbol"].tolist()
-
-                state["watchlist"] = eod_symbols
-
-                if eod_symbols:
-                    # Sector Heatmap Correlation
-                    sectors = combined_eod[combined_eod["Sector"] != "Unknown"]["Sector"]
-                    sector_counts = sectors.value_counts()
-                    hot_sectors = sector_counts[sector_counts >= 2]
-                    
+                if not combined.empty:
+                    # Sector heatmap
+                    sectors = combined[combined["Sector"] != "Unknown"]["Sector"].value_counts()
+                    hot = sectors[sectors >= 2]
                     sector_msg = ""
-                    if not hot_sectors.empty:
-                        sector_msg = "\n\n🔥 Hot Sectors:\n" + "\n".join([f"• {s} ({c})" for s, c in hot_sectors.items()])
-
-                    summary_lines = []
-                    # Limit exactly to 10 for professional conciseness
-                    for _, r in combined_eod.head(10).iterrows():
-                        prefix = "⭐" if r["WinProb"] >= 65 or r["TightnessScore"] >= 8 else "•"
-                        summary_lines.append(f"{prefix} {r['Symbol']} ₹{r['Price']:.0f} — {r['Notes']}")
-                    summary = "\n".join(summary_lines)
-
-                    send_telegram_message(
-                        f"📋 TOP 10 WATCHLIST\n\n{summary}{sector_msg}"
-                    )
+                    if not hot.empty:
+                        sector_msg = "\n\nHot Sectors:\n" + "\n".join(f"- {s} ({c})" for s, c in hot.items())
+                    send_telegram(fmt_watchlist(combined) + sector_msg)
                 else:
-                    send_telegram_message("🏁 *Market Closed* — No clean setups for tomorrow.")
+                    send_telegram("*Market Closed* — No clean setups for tomorrow.")
             else:
-                # During market hours: keep existing watchlist, just update with new finds
+                # Intraday: merge new finds into existing watchlist
                 existing = set(state.get("watchlist", []))
                 new_wl = set(watchlist["Symbol"].tolist()) if not watchlist.empty else set()
                 state["watchlist"] = list(existing | new_wl)
-        # --- 5. Save persistent state ---
-        state["alerted_today"] = list(alerted_set)
+
+        # --- Weekly Discovery (Monday only) ---
+        if now.weekday() == 0 and now.hour >= 10:
+            print("\nWEEKLY DEEP DIVE — Full Universe...")
+            full_universe = get_full_universe()
+            non_nifty = [s for s in full_universe if s not in set(nifty500)]
+            print(f"  Non-Nifty500 stocks to scan: {len(non_nifty)}")
+
+            discovery_results = scan_universe(non_nifty, args.period, args.interval)
+            if not discovery_results.empty:
+                # Only promote high-quality stocks
+                elite = discovery_results[discovery_results["Score"] >= DISCOVERY_MIN_SCORE]
+                if not elite.empty:
+                    promoted = elite["Symbol"].tolist()
+                    state["discovery"] = promoted
+                    send_telegram(fmt_discovery(elite))
+                    print(f"  Promoted {len(promoted)} stocks to discovery list.")
+
+        # --- Save ---
+        state["alerted_today"] = list(alerted)
         save_state(state)
-        print(f"\n✅ State saved: {len(state['watchlist'])} watchlist, {len(alerted_set)} alerted")
+        print(f"\nState saved: {len(state['watchlist'])} watchlist, {len(alerted)} alerted, {len(state.get('discovery', []))} discovery")
 
     except Exception as e:
-        print("❌ CRITICAL ERROR IN SCREENER:")
+        print("CRITICAL ERROR:")
         traceback.print_exc()
-        # Try to notify via Telegram
         try:
-            send_telegram_message(f"❌ *Screener Crashed*: {str(e)[:200]}")
+            send_telegram(f"*Scanner Crashed*: {str(e)[:200]}")
         except Exception:
             pass
         sys.exit(1)
