@@ -1,96 +1,103 @@
-# 🚀 NSE Swing Screener: Institutional Terminal
+# 🚀 NSE Swing Screener: Professional-Grade Trading Engine
 
-An institutional-grade quantitative screening terminal for the **National Stock Exchange (NSE) of India**. Designed for hyper-speed analysis, predicting high-probability swing setups using state-of-the-art technical models.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Market](https://img.shields.io/badge/Market-NSE%20India-orange.svg)](https://www.nseindia.com/)
+[![Automation](https://img.shields.io/badge/Automation-GitHub%20Actions-green.svg)](https://github.com/features/actions)
 
-![License](https://img.shields.io/badge/License-Proprietary-red.svg)
-![Python](https://img.shields.io/badge/Python-3.14%2B-blue.svg)
-![Framework](https://img.shields.io/badge/Backend-FastAPI-green.svg)
-![UI](https://img.shields.io/badge/UI-Vanilla%20JS-orange.svg)
-
----
-
-## ⚡ Key Highlights
-
-- **Hyper-Speed Scanning**: Analyzes the entire NSE universe (2,600+ stocks) in **under 60 seconds** using bulk price downloads and parallel finalist processing.
-- **Smart Data Vault**: Integrated SQLite caching reduces network overhead by 90% on repeated scans.
-- **Institutional Predictors**: 
-  - **Minervini Trend Template**: Identifies Stage 2 uptrends.
-  - **RS Rating (Relative Strength)**: Percentile ranking (0-99) of every stock relative to the entire market.
-  - **Setup Detectors**: VCP (Volatility Contraction), SFP (Swing Failure), and IPO Base detection.
-- **Modern Dashboard**: A sleek, institutional dark-mode UI with live ticker autocomplete and interactive table filtering.
+A high-performance, automated quantitative screening terminal designed for the **National Stock Exchange (NSE)**. This engine identifies high-probability swing trading setups using institutional-grade technical models, including **Minervini's Trend Template** and **Volatility Contraction Patterns (VCP)**.
 
 ---
 
-## 📂 Project Structure
+## ⚡ Key Capabilities
+
+### 🔍 Advanced Quantitative Engine
+- **Minervini Stage 2 Template**: Full implementation of Mark Minervini's trend requirements (50/150/200 EMA stacks, 52-week high/low proximity, and trend persistence).
+- **VCP Detector**: Identifies volatility contraction setups with price tightening, volume drying, and pivot-point proximity.
+- **RS Rating (Relative Strength)**: Calculates the 0-99 percentile ranking for every stock relative to the entire market, mimicking the IBD/MarketSmith model.
+- **Confluence Scoring (0-15)**: A weighted multi-factor model combining RSI, MACD, Volume Multiplier, ADX, and CLV (Close Location Value) Delta.
+- **SFP & IPO Base Detection**: Specialized logic for Swing Failure Patterns and high-momentum IPO breakouts.
+
+### 🤖 Autonomous Operations
+- **GitHub Actions Integration**: Runs automatically every 10 minutes during NSE trading hours (09:15 - 15:30 IST).
+- **Telegram Alerts**: Delivers instant notifications for **ACTIONABLE** breakouts and **WATCHLIST** setups directly to your phone.
+- **Persistent Memory**: Maintains a cross-session watchlist using SQLite and file caching to track setups as they mature from watchlist to entry.
+
+### 📊 Performance & UI
+- **Hyper-Scanning**: Analyzes 2,600+ symbols in under 60 seconds using parallel processing and bulk data downloads.
+- **Sleek Dashboard**: A modern, dark-mode web interface built with FastAPI and Vanilla JS for real-time manual scans.
+
+---
+
+## 📂 Project Architecture
 
 ```text
 .
-├── main.py                    # FastAPI Backend & API Layer
-├── swing_screener.py          # Core Quantitative Engine
-├── static/                    # Frontend Assets (HTML/CSS/JS)
+├── swing_screener.py          # Core Quantitative & Alerting Engine
+├── main.py                    # FastAPI Web Server & API Layer
+├── static/                    # Frontend: HTML/CSS/JS Dashboard
+├── .github/workflows/         # Automation: Live Market Monitor
 ├── nse_screener_cache.db      # SQLite Fundamental Data Vault
-├── requirements.txt           # Python Dependencies
-└── Procfile                   # Deployment Config for Railway/Render
+└── watchlist_persistent.json  # Cross-session memory for setups
 ```
 
 ---
 
 ## 🛠️ Installation & Setup
 
-### 1. Clone the Repository
+### 1. Local Environment
 ```bash
-git clone https://github.com/brrrezy/nse_screrner.git
-cd nse_screrner
-```
+# Clone the repository
+git clone https://github.com/brrrezy/nse-screener.git
+cd nse-screener
 
-### 2. Install Dependencies
-```bash
+# Install requirements
 pip install -r requirements.txt
-```
 
-### 3. Run Locally
-```bash
+# Run the web dashboard
 python main.py
 ```
-Open your browser to `http://localhost:8000`.
+Access the dashboard at `http://localhost:8000`.
+
+### 2. Configure Telegram Alerts
+To receive live alerts, set the following environment variables:
+- `TELEGRAM_BOT_TOKEN`: Your bot token from @BotFather.
+- `TELEGRAM_CHAT_ID`: Your personal chat ID or Group ID.
+
+### 3. Deploy Automation (GitHub Actions)
+1. Fork/Push this repo to GitHub.
+2. Go to **Settings > Secrets and variables > Actions**.
+3. Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as **Repository Secrets**.
+4. The workflow in `.github/workflows/monitor.yml` will automatically start on the next market session.
 
 ---
 
-## 📈 Quantitative Engine Details
+## 📈 Technical Confluence Model
 
-The terminal uses a **Confluence Scoring Model (0-13)**:
-- **Technical Confluence (0-8)**: RSI, MACD, Stochastics, EMA Stack, Volume Multiplier, ADX, and CLV Delta.
-- **Setup Bonus (0-4)**: 
-  - VCP Detected (+2)
-  - Swing Failure (+2)
-  - IPO Base (+1)
-  - Minervini Stage 2 (+1)
-- **Fundamental Quality (0-1)**: Based on ROE, Debt/Equity, and Revenue Growth.
+The engine scores stocks based on a **15-point confluence model**:
 
----
-
-## 🚀 Deployment (Railway.app)
-
-This project is ready for one-click deployment on **Railway**:
-1. Connect your GitHub repository to Railway.
-2. Railway will automatically detect the `Procfile` and `requirements.txt`.
-3. Add a **Persistent Volume** if you want to keep the `nse_screener_cache.db` between restarts.
+| Category | Factor | Points |
+| :--- | :--- | :--- |
+| **Trend** | Minervini Stage 2 | +1 |
+| **Setup** | VCP Detected | +2 |
+| **Setup** | Swing Failure / IPO Base | +1 to +2 |
+| **Trigger** | Breakout + Volume Expansion | +5 |
+| **Momentum** | RSI > 55 & MACD Bullish | +2 |
+| **Strength** | RS Rating > 80 | +1 |
+| **Fundamentals** | ROE > 15%, Positive Revenue Growth | +1 |
 
 ---
 
-## 🤝 Credits & Support
+## 📝 Legal Disclaimer
 
-Made with ❤️ by **[brrrezy](https://github.com/brrrezy)** in India.
+**Not Financial Advice**: This software is provided for educational and research purposes only. The author is not a SEBI-registered advisor. Trading in financial markets involves significant risk. Always perform your own due diligence or consult a certified financial professional before making investment decisions.
 
+---
+
+## 🤝 Support & Contribution
+
+Created by **[brrrezy](https://github.com/brrrezy)**.
 - **Portfolio**: [shivanshusr.vercel.app](https://shivanshusr.vercel.app/)
 - **GitHub**: [@brrrezy](https://github.com/brrrezy)
 
----
-
-## 📝 Legal Notice & Advisory
-
-**Advisory**: This tool is for educational and research purposes only. I am not a SEBI-registered advisor. Trading in the stock market involves a high risk of loss. Always conduct your own research or consult with a professional financial advisor before making any investment decisions.
-
----
-
-Happy Trading! 📊📉
+If you find this tool useful, consider giving it a ⭐!
