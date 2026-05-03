@@ -1,4 +1,5 @@
 import argparse
+import concurrent.futures
 import datetime as dt
 import gc
 import json
@@ -400,6 +401,94 @@ class Candidate:
     details: Dict[str, Any]
 
 
+def process_ticker(sym: str, df: pd.DataFrame, is_manual: bool) -> Dict[str, Any]:
+    try:
+        df = add_technical_indicators(normalize_ohlcv_df(df))
+        latest = df.iloc[-1]
+
+        # Risk/Reward Filter: Skip very expensive stocks (> 1000 INR)
+        if float(latest["Close"]) > 1000 and not is_manual:
+            return {"status": "skipped"}
+
+        # Step 1: Filter (Minervini Trend)
+        is_trend = detect_minervini_trend(df)
+        if not is_trend and not is_manual:
+            return {"status": "skipped"}
+
+        # Step 2: Setup (Watchlist)
+        is_vcp, vcp_details = detect_vcp_setup(df)
+        is_sfp = detect_swing_failure(df)
+        is_ipo = detect_ipo_base(df)  # Uses df length — no API call
+
+        is_setup = is_vcp or is_sfp or is_ipo
+
+        # Step 3: Trigger (Entry)
+        is_trigger = False
+        trigger_details = {}
+        pivot_high = vcp_details.get("pivot_high", float(df["High"].tail(20).max()))
+
+        if is_setup:
+            is_trigger, trigger_details = detect_breakout_trigger(df, pivot_high)
+
+        # Confluence score as extra quality check
+        conf_score, conf_sigs = predicta_v4_confluence(latest)
+
+        sector = get_sector(sym) if (is_setup or is_trigger) else "Unknown"
+
+        win_prob_val = 0.0
+        win_total = 0
+        if is_trigger or is_setup:
+            _, win_total, win_prob_val = calculate_historical_win_rate(df)
+        
+        win_prob_display = f"{win_prob_val:.0f}%" if win_total >= 3 else "NA"
+
+        # Build notes for clarity
+        notes = []
+        if is_vcp: notes.append("VCP")
+        if is_sfp: notes.append("SFP")
+        if is_ipo: notes.append("IPO Base")
+
+        if is_vcp:
+            notes.append(f"Tight:{vcp_details.get('tightness_score', 1)}/10")
+            if vcp_details.get("has_footprints"): notes.append("Accumulation")
+            if vcp_details.get("vol_dry"): notes.append("Vol Dry")
+
+        if is_trigger:
+            notes.append("BREAKOUT")
+        
+        notes.append(f"WinProb:{win_prob_display}")
+
+        status = "ACTIONABLE" if (is_setup and is_trigger) else ("WATCHLIST" if is_setup else "TRENDING")
+
+        row = {
+            "Symbol": sym,
+            "Sector": sector,
+            "Status": status,
+            "Notes": ", ".join(notes) if notes else "Trending",
+            "Price": float(latest["Close"]),
+            "Pivot": float(pivot_high),
+            "Score": conf_score + (5 if is_trigger else (2 if is_setup else 0)),
+            "Minervini": is_trend,
+            "VCP_Setup": is_vcp,
+            "SFP": is_sfp,
+            "IPO_Base": is_ipo,
+            "Breakout": is_trigger,
+            "WinProb": win_prob_val,
+            "TightnessScore": vcp_details.get("tightness_score", 0),
+            "Vol_Dry": vcp_details.get("vol_dry", False),
+            "Tightness": vcp_details.get("is_tight", False),
+            "VolMult": float(latest["vol_mult"]),
+            "RSI": float(latest["rsi"]),
+            "ADR%": float(latest["adrp20"]),
+            **{f"C_{k}": v for k, v in conf_sigs.items()},
+        }
+        return {
+            "status": "success",
+            "candidate": Candidate(sym, row["Score"], row["Price"], calculate_rs_raw(df), row)
+        }
+    except Exception:
+        return {"status": "error"}
+
 def run_full_system(
     universe_limit: int = 0,
     min_confluence_score: int = 6,
@@ -427,6 +516,7 @@ def run_full_system(
     print(f"Scanning {len(stocks)} symbols in chunks...")
     candidates = []
     chunk_size = 50
+    is_manual = bool(manual_symbols)
 
     for i in range(0, len(stocks), chunk_size):
         chunk = stocks[i : i + chunk_size]
@@ -443,101 +533,38 @@ def run_full_system(
             print(f"Chunk download failed: {e}")
             bulk_df = pd.DataFrame()
 
-        for sym in tqdm(chunk, desc=f"Chunk {i // chunk_size + 1}"):
-            counters["scanned"] += 1
+        valid_items = []
+        is_multi = isinstance(bulk_df.columns, pd.MultiIndex)
+        for sym in chunk:
             try:
-                if sym not in bulk_df.columns.levels[0]:
-                    continue
-                df = bulk_df[sym].dropna(how="all").copy()
-                if len(df) < 90:
-                    continue
-
-                df = add_technical_indicators(normalize_ohlcv_df(df))
-                latest = df.iloc[-1]
-
-                # Risk/Reward Filter: Skip very expensive stocks (> 5000 INR)
-                if float(latest["Close"]) > 1000 and not manual_symbols:
-                    continue
-
-                # Step 1: Filter (Minervini Trend)
-                is_trend = detect_minervini_trend(df)
-                if not is_trend and not manual_symbols:
-                    continue
-
-                counters["passed_filter"] += 1
-
-                # Step 2: Setup (Watchlist)
-                is_vcp, vcp_details = detect_vcp_setup(df)
-                is_sfp = detect_swing_failure(df)
-                is_ipo = detect_ipo_base(df)  # Uses df length — no API call
-
-                is_setup = is_vcp or is_sfp or is_ipo
-
-                # Step 3: Trigger (Entry)
-                is_trigger = False
-                trigger_details = {}
-                pivot_high = vcp_details.get("pivot_high", float(df["High"].tail(20).max()))
-
-                if is_setup:
-                    is_trigger, trigger_details = detect_breakout_trigger(df, pivot_high)
-
-                # Confluence score as extra quality check
-                conf_score, conf_sigs = predicta_v4_confluence(latest)
-
-                sector = get_sector(sym) if (is_setup or is_trigger) else "Unknown"
-
-                win_prob_val = 0.0
-                win_total = 0
-                if is_trigger or is_setup:
-                    _, win_total, win_prob_val = calculate_historical_win_rate(df)
+                if is_multi:
+                    if sym not in bulk_df.columns.levels[0]:
+                        continue
+                    df = bulk_df[sym].dropna(how="all").copy()
+                else:
+                    if bulk_df.empty:
+                        continue
+                    df = bulk_df.dropna(how="all").copy()
                 
-                win_prob_display = f"{win_prob_val:.0f}%" if win_total >= 3 else "NA"
-
-                # Build notes for clarity
-                notes = []
-                if is_vcp: notes.append("VCP")
-                if is_sfp: notes.append("SFP")
-                if is_ipo: notes.append("IPO Base")
-
-                if is_vcp:
-                    notes.append(f"Tight:{vcp_details.get('tightness_score', 1)}/10")
-                    if vcp_details.get("has_footprints"): notes.append("Accumulation")
-                    if vcp_details.get("vol_dry"): notes.append("Vol Dry")
-
-                if is_trigger:
-                    notes.append("BREAKOUT")
-                
-                notes.append(f"WinProb:{win_prob_display}")
-
-                status = "ACTIONABLE" if (is_setup and is_trigger) else ("WATCHLIST" if is_setup else "TRENDING")
-
-                row = {
-                    "Symbol": sym,
-                    "Sector": sector,
-                    "Status": status,
-                    "Notes": ", ".join(notes) if notes else "Trending",
-                    "Price": float(latest["Close"]),
-                    "Pivot": float(pivot_high),
-                    "Score": conf_score + (5 if is_trigger else (2 if is_setup else 0)),
-                    "Minervini": is_trend,
-                    "VCP_Setup": is_vcp,
-                    "SFP": is_sfp,
-                    "IPO_Base": is_ipo,
-                    "Breakout": is_trigger,
-                    "WinProb": win_prob_val,
-                    "TightnessScore": vcp_details.get("tightness_score", 0),
-                    "Vol_Dry": vcp_details.get("vol_dry", False),
-                    "Tightness": vcp_details.get("is_tight", False),
-                    "VolMult": float(latest["vol_mult"]),
-                    "RSI": float(latest["rsi"]),
-                    "ADR%": float(latest["adrp20"]),
-                    **{f"C_{k}": v for k, v in conf_sigs.items()},
-                }
-                candidates.append(
-                    Candidate(sym, row["Score"], row["Price"], calculate_rs_raw(df), row)
-                )
+                if len(df) >= 90:
+                    valid_items.append((sym, df))
             except Exception:
-                counters["errors"] += 1
+                continue
+
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            futures = {executor.submit(process_ticker, sym, df, is_manual): sym for sym, df in valid_items}
+            
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"Chunk {i // chunk_size + 1}"):
+                counters["scanned"] += 1
+                try:
+                    res = future.result()
+                    if res["status"] == "success":
+                        counters["passed_filter"] += 1
+                        candidates.append(res["candidate"])
+                    elif res["status"] == "error":
+                        counters["errors"] += 1
+                except Exception:
+                    counters["errors"] += 1
 
         del bulk_df
         gc.collect()
