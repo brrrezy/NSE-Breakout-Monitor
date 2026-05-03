@@ -5,8 +5,8 @@ on:
     # NSE Market Hours: 09:15 to 15:30 IST (03:45 to 10:00 UTC)
     # Pre-open scan at 09:10 IST (03:40 UTC)
     - cron: '40 3 * * 1-5'
-    # Every 20 minutes during market hours (saves GitHub quota)
-    - cron: '*/20 4-9 * * 1-5'
+    # Every 10 minutes during market hours
+    - cron: '*/10 4-9 * * 1-5'
     # Closing scan at 15:30 IST (10:00 UTC)
     - cron: '0 10 * * 1-5'
   workflow_dispatch: # Manual trigger

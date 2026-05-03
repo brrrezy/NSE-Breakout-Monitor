@@ -262,6 +262,7 @@ def detect_breakout_trigger(df: pd.DataFrame, pivot_high: float) -> Tuple[bool, 
     Detects Breakout Trigger (Entry phase):
     - Price breaking above pivot/resistance
     - Volume expansion
+    - Strong close to avoid fakes
     """
     latest = df.iloc[-1]
 
@@ -270,9 +271,16 @@ def detect_breakout_trigger(df: pd.DataFrame, pivot_high: float) -> Tuple[bool, 
     # Conviction: Volume > 1.5x 50-day average OR 1.5x 20-day average
     vol_conviction = (latest["Volume"] > latest["vol_ma50"] * 1.5) or (latest["vol_mult"] > 1.5)
 
-    is_trigger = price_break and vol_conviction
+    # Fakeout protection: close should be in the top 60% of the daily range
+    # This filters out bad wicks but isn't too rigid to cause missed trades.
+    daily_range = latest["High"] - latest["Low"]
+    strong_close = True
+    if daily_range > 0:
+        strong_close = latest["Close"] >= (latest["Low"] + daily_range * 0.4)
 
-    return bool(is_trigger), {"price_break": price_break, "vol_conviction": vol_conviction}
+    is_trigger = price_break and vol_conviction and strong_close
+
+    return bool(is_trigger), {"price_break": price_break, "vol_conviction": vol_conviction, "strong_close": strong_close}
 
 
 def detect_swing_failure(df: pd.DataFrame, lookback: int = 20) -> bool:
@@ -533,7 +541,8 @@ if __name__ == "__main__":
                             f"🔥 *BREAKOUT: {row['Symbol']}*\n"
                             f"💰 Price: ₹{row['Price']:.2f}\n"
                             f"🎯 Pivot: ₹{row['Pivot']:.2f}\n"
-                            f"📝 {row['Notes']}"
+                            f"📊 Vol: {row['VolMult']:.1f}x avg\n"
+                            f"📝 Setup: {row['Notes']}"
                         )
                         send_telegram_message(msg)
                         alerted_set.add(row["Symbol"])
@@ -569,7 +578,8 @@ if __name__ == "__main__":
                         f"🔥 *BREAKOUT: {row['Symbol']}*\n"
                         f"💰 Price: ₹{row['Price']:.2f}\n"
                         f"🎯 Pivot: ₹{row['Pivot']:.2f}\n"
-                        f"📝 {row['Notes']}"
+                        f"📊 Vol: {row['VolMult']:.1f}x avg\n"
+                        f"📝 Setup: {row['Notes']}"
                     )
                     send_telegram_message(msg)
                     alerted_set.add(row["Symbol"])
@@ -580,14 +590,18 @@ if __name__ == "__main__":
 
             if is_eod:
                 print("🏁 END OF DAY — Generating tomorrow's watchlist...")
-                eod_symbols = list(dict.fromkeys(
-                    watchlist["Symbol"].tolist() + actionable["Symbol"].tolist()
-                ))
+                combined_eod = pd.concat([watchlist, actionable]).drop_duplicates(subset=["Symbol"])
+                eod_symbols = combined_eod["Symbol"].tolist()
 
                 state["watchlist"] = eod_symbols
 
                 if eod_symbols:
-                    summary = "\n".join([f"• {s}" for s in eod_symbols[:20]])
+                    summary_lines = []
+                    for _, r in combined_eod.head(20).iterrows():
+                        emoji = "🔥" if r["Status"] == "ACTIONABLE" else "👀"
+                        summary_lines.append(f"{emoji} {r['Symbol']} — ₹{r['Price']:.0f} | {r['Notes']}")
+                    summary = "\n".join(summary_lines)
+
                     send_telegram_message(
                         f"🏁 *Market Closed — Tomorrow's Watchlist*\n"
                         f"({len(eod_symbols)} stocks)\n\n{summary}"
