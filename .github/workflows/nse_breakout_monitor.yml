@@ -1,0 +1,47 @@
+name: NSE Breakout Scanner
+
+on:
+  schedule:
+    # NSE Market Hours: 09:15 to 15:30 IST (03:45 to 10:00 UTC)
+    # Pre-open scan at 09:10 IST (03:40 UTC)
+    - cron: '40 3 * * 1-5'
+    # Every 20 minutes during market hours (saves GitHub quota)
+    - cron: '*/20 4-9 * * 1-5'
+    # Closing scan at 15:30 IST (10:00 UTC)
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch: # Manual trigger
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore State Cache
+        uses: actions/cache@v4
+        with:
+          path: watchlist_persistent.json
+          key: state-${{ github.run_number }}
+          restore-keys: |
+            state-
+
+      - name: Ensure State File Exists
+        run: touch watchlist_persistent.json
+
+      - name: Run Screener
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 breakout_scanner.py --top-n 25

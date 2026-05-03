@@ -1,4 +1,5 @@
 {
+    "editor.codeActionsOnSave": {},
     "editor.lineHeight": 1.7,
     "editor.scrollbar.ignoreHorizontalScrollbarInContentHeight": false,
     "editor.cursorStyle": "underline",
