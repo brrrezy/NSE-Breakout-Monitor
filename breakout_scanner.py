@@ -552,9 +552,8 @@ if __name__ == "__main__":
                 if not wl_rows.empty:
                     lines = []
                     for _, r in wl_rows.head(15).iterrows():
-                        emoji = "🔥" if r["Status"] == "ACTIONABLE" else "👀"
-                        lines.append(f"{emoji} {r['Symbol']} — ₹{r['Price']:.0f} | {r['Notes']}")
-                    send_telegram_message("📋 *Morning Watchlist Update*\n\n" + "\n".join(lines))
+                        lines.append(f"{r['Symbol']} {r['Price']:.0f} ({r['Notes']})")
+                    send_telegram_message(f"📋 Watchlist ({len(wl_rows)}):\n\n" + "\n".join(lines))
 
         # --- 3. Full market scan (always runs) ---
         print("\n🔎 FULL MARKET SCAN...")
@@ -598,13 +597,11 @@ if __name__ == "__main__":
                 if eod_symbols:
                     summary_lines = []
                     for _, r in combined_eod.head(20).iterrows():
-                        emoji = "🔥" if r["Status"] == "ACTIONABLE" else "👀"
-                        summary_lines.append(f"{emoji} {r['Symbol']} — ₹{r['Price']:.0f} | {r['Notes']}")
+                        summary_lines.append(f"{r['Symbol']} {r['Price']:.0f} ({r['Notes']})")
                     summary = "\n".join(summary_lines)
 
                     send_telegram_message(
-                        f"🏁 *Market Closed — Tomorrow's Watchlist*\n"
-                        f"({len(eod_symbols)} stocks)\n\n{summary}"
+                        f"📋 Watchlist ({len(eod_symbols)}):\n\n{summary}"
                     )
                 else:
                     send_telegram_message("🏁 *Market Closed* — No clean setups for tomorrow.")
