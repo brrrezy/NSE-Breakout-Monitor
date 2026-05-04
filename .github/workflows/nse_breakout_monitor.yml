@@ -4,7 +4,11 @@ on:
   schedule:
     # Pre-open at 09:10 IST (03:40 UTC) — Mon to Fri
     - cron: '40 3 * * 1-5'
-    # Every 10 minutes during market hours (09:20–15:30 IST = 03:50–10:00 UTC)
+    # Market Open at 09:15 IST (03:45 UTC)
+    - cron: '45 3 * * 1-5'
+    # 09:20 IST (03:50 UTC)
+    - cron: '50 3 * * 1-5'
+    # Every 10 minutes during market hours (09:30–15:20 IST = 04:00–09:50 UTC)
     - cron: '*/10 4-9 * * 1-5'
     # Closing scan at 15:30 IST (10:00 UTC)
     - cron: '0 10 * * 1-5'
