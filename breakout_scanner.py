@@ -71,8 +71,17 @@ def load_state() -> dict:
     try:
         data = json.loads(STATE_FILE.read_text().strip() or "{}")
         if isinstance(data, list):
-            return {**default, "watchlist": data}
-        return {**default, **data}
+            state_dict = {**default, "watchlist": data}
+        else:
+            state_dict = {**default, **data}
+            
+        # Clean out any test/dummy symbols
+        if "watchlist" in state_dict:
+            state_dict["watchlist"] = [s for s in state_dict["watchlist"] if not s.startswith("DUMMY")]
+        if "discovery" in state_dict:
+            state_dict["discovery"] = [s for s in state_dict["discovery"] if not s.startswith("DUMMY")]
+            
+        return state_dict
     except Exception:
         return default
 
