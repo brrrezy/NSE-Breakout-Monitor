@@ -222,7 +222,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 def check_market_regime() -> Tuple[bool, str]:
     """Check if Nifty 50 is in a healthy uptrend. Avoids breakout trading in bear markets."""
     try:
-        nifty = yf.download("^NSEI", period="1y", interval="1d", progress=False)
+        nifty = yf.download("^NSEI", period="2y", interval="1d", progress=False)
         if nifty.empty or len(nifty) < 200:
             return True, "Unknown"  # If we can't check, assume OK
         
@@ -398,13 +398,16 @@ def analyze_ticker(sym: str, df: pd.DataFrame, is_manual: bool) -> Optional[Cand
         if price > MAX_PRICE and not is_manual:
             return None
 
+        # Detect IPO (less than 1 year of trading data)
+        is_ipo = len(df) < 252
+
+        # Strict Minervini trend requires 200 days. True IPOs are exempt from this strict check.
         is_trend = detect_minervini(df)
-        if not is_trend and not is_manual:
+        if not is_trend and not is_ipo and not is_manual:
             return None
 
         is_vcp, vcp = detect_vcp(df)
         is_sfp = detect_sfp(df)
-        is_ipo = len(df) < 252
         is_setup = is_vcp or is_sfp or is_ipo
 
         pivot = vcp.get("pivot_high", float(df["High"].tail(20).max()))
@@ -596,7 +599,7 @@ def fmt_discovery(df: pd.DataFrame) -> str:
 
 def parse_args():
     p = argparse.ArgumentParser(description="NSE Breakout Scanner Pro")
-    p.add_argument("--period", default="1y")
+    p.add_argument("--period", default="2y")
     p.add_argument("--interval", default="1d")
     p.add_argument("--test-alert", action="store_true")
     return p.parse_args()
