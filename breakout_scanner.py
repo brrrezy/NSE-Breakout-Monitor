@@ -627,8 +627,8 @@ if __name__ == "__main__":
             state["alerted_today"] = []
             state["alerted_date"] = today
 
-        # Weekly discovery reset (Monday)
-        if now.weekday() == 0 and state.get("discovery_date") != today:
+        # Weekly discovery reset (Friday)
+        if now.weekday() == 4 and state.get("discovery_date") != today:
             state["discovery"] = []
             state["discovery_date"] = today
 
@@ -647,37 +647,53 @@ if __name__ == "__main__":
         scan_symbols = list(set(nifty500 + discovery_syms + state.get("watchlist", [])))
         print(f"Daily Universe: {len(scan_symbols)} (N500: {len(nifty500)}, Discovery: {len(discovery_syms)})")
 
-        # --- Morning Priority (09:10-09:59 IST) ---
-        is_morning = now.hour == 9 and 10 <= now.minute <= 59
-        if is_morning and state.get("watchlist"):
-            print("\nMORNING PRIORITY SCAN...")
-            priority = scan_universe(state["watchlist"], args.period, args.interval, is_manual=True)
-            if not priority.empty:
-                for _, row in priority.iterrows():
-                    if row["Status"] == "ACTIONABLE" and row["Symbol"] not in alerted:
-                        send_telegram(fmt_breakout(row))
-                        alerted.add(row["Symbol"])
-                wl = priority[priority["Status"].isin(["WATCHLIST", "ACTIONABLE"])]
-                if not wl.empty:
-                    send_telegram(fmt_watchlist(wl, "MORNING WATCHLIST"))
+        # --- Morning Priority (09:10-09:14 IST) ---
+        is_morning = now.hour == 9 and 10 <= now.minute <= 14
+        if is_morning:
+            print("\nMORNING PRIORITY SCAN (Pre-open)...")
+            if state.get("watchlist"):
+                priority = scan_universe(state["watchlist"], args.period, args.interval, is_manual=True)
+                if not priority.empty:
+                    for _, row in priority.iterrows():
+                        if row["Status"] == "ACTIONABLE" and row["Symbol"] not in alerted:
+                            send_telegram(fmt_breakout(row))
+                            alerted.add(row["Symbol"])
+                    wl = priority[priority["Status"].isin(["WATCHLIST", "ACTIONABLE"])]
+                    if not wl.empty:
+                        send_telegram(fmt_watchlist(wl, "MORNING WATCHLIST"))
+            
+            # Skip main scan during pre-open
+            scan_symbols = []
 
         # --- Main Scan ---
-        print("\nMAIN SCAN...")
-        results = scan_universe(scan_symbols, args.period, args.interval)
+        results = pd.DataFrame()
+        actionable = pd.DataFrame()
+        watchlist = pd.DataFrame()
+        
+        if scan_symbols:
+            print("\nMAIN SCAN...")
+            results = scan_universe(scan_symbols, args.period, args.interval)
 
-        if not results.empty:
-            actionable = results[results["Status"] == "ACTIONABLE"]
-            watchlist = results[results["Status"] == "WATCHLIST"]
+            if not results.empty:
+                actionable = results[results["Status"] == "ACTIONABLE"]
+                watchlist = results[results["Status"] == "WATCHLIST"]
 
-            for _, row in actionable.iterrows():
-                if row["Symbol"] not in alerted:
-                    send_telegram(fmt_breakout(row))
-                    alerted.add(row["Symbol"])
+                for _, row in actionable.iterrows():
+                    if row["Symbol"] not in alerted:
+                        send_telegram(fmt_breakout(row))
+                        alerted.add(row["Symbol"])
 
-            # --- EOD (after 15:20 IST) ---
-            now = get_now_ist()
-            if now.hour >= 15 and now.minute >= 20:
-                print("\nEND OF DAY...")
+                # Intraday: merge new finds into existing watchlist
+                if now.hour < 15 or (now.hour == 15 and now.minute < 28):
+                    existing = set(state.get("watchlist", []))
+                    new_wl = set(watchlist["Symbol"].tolist()) if not watchlist.empty else set()
+                    state["watchlist"] = list(existing | new_wl)
+
+        # --- EOD (15:30 IST) ---
+        now = get_now_ist()
+        if now.hour >= 15 and now.minute >= 28:
+            print("\nEND OF DAY...")
+            if not results.empty:
                 combined = pd.concat([watchlist, actionable]).drop_duplicates(subset=["Symbol"])
                 state["watchlist"] = combined["Symbol"].tolist()
 
@@ -692,13 +708,10 @@ if __name__ == "__main__":
                 else:
                     send_telegram("*Market Closed* — No clean setups for tomorrow.")
             else:
-                # Intraday: merge new finds into existing watchlist
-                existing = set(state.get("watchlist", []))
-                new_wl = set(watchlist["Symbol"].tolist()) if not watchlist.empty else set()
-                state["watchlist"] = list(existing | new_wl)
+                send_telegram("*Market Closed* — No clean setups for tomorrow.")
 
-        # --- Weekly Discovery (Monday only) ---
-        if now.weekday() == 0 and now.hour >= 10:
+        # --- Weekly Discovery (Friday EOD) ---
+        if now.weekday() == 4 and now.hour >= 15 and now.minute >= 28:
             print("\nWEEKLY DEEP DIVE — Full Universe...")
             full_universe = get_full_universe()
             non_nifty = [s for s in full_universe if s not in set(nifty500)]
