@@ -231,13 +231,18 @@ def check_market_regime() -> Tuple[bool, str]:
             nifty.columns = nifty.columns.get_level_values(0)
         
         c = nifty["Close"].iloc[-1]
+        ema21 = ta.trend.ema_indicator(nifty["Close"], 21).iloc[-1]
         ema50 = ta.trend.ema_indicator(nifty["Close"], 50).iloc[-1]
         ema200 = ta.trend.ema_indicator(nifty["Close"], 200).iloc[-1]
 
-        if c > ema50 > ema200:
-            return True, "Bull"
+        if c > ema50 and ema50 > ema200:
+            return True, "Confirmed Bull"
+        elif c > ema21 and c > ema50:
+            return True, "Short-Term Bull"
         elif c > ema200:
             return True, "Neutral"
+        elif c > ema21:
+            return True, "Recovery"
         else:
             return False, "Bear"
     except Exception:
