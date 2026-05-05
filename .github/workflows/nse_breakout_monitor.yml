@@ -1,15 +1,6 @@
 name: NSE Breakout Scanner
 
 on:
-  schedule:
-    # Pre-open at 09:10 IST (03:40 UTC) — Mon to Fri
-    - cron: '40 3 * * 1-5'
-    # Intraday scanning every 10 mins starting at 09:15 IST (03:45 UTC) to 09:25 IST (03:55 UTC)
-    - cron: '45,55 3 * * 1-5'
-    # Intraday scanning every 10 mins from 09:35 IST (04:05 UTC) to 15:25 IST (09:55 UTC)
-    - cron: '5-55/10 4-9 * * 1-5'
-    # End of day scan at 15:30 IST (10:00 UTC)
-    - cron: '0 10 * * 1-5'
   workflow_dispatch:
 
 env:
