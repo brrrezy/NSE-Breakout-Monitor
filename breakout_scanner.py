@@ -98,7 +98,9 @@ def send_telegram(msg: str):
             json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
             timeout=10,
         )
-        if r.status_code != 200:
+        if r.status_code == 200:
+            print(f"[TG] ✅ Sent ({len(msg)} chars)")
+        else:
             print(f"[TG] {r.status_code}: {r.text[:200]}")
     except Exception as e:
         print(f"[TG] Error: {e}")
@@ -139,9 +141,12 @@ def get_nifty500() -> List[str]:
     try:
         df = pd.read_csv(StringIO("\n".join(lines)))
         col = "Symbol" if "Symbol" in df.columns else df.columns[2]
-        return [s.strip() + ".NS" for s in df[col].dropna().tolist()]
+        syms = [s.strip() + ".NS" for s in df[col].dropna().tolist()]
+        # NSE includes dummy test entries (DUMMYVEDL1-4) in official CSV — filter them
+        syms = [s for s in syms if not s.startswith("DUMMY")]
+        return syms
     except Exception:
-        return [_clean_symbol(l) for l in lines[1:] if l.strip()]
+        return [_clean_symbol(l) for l in lines[1:] if l.strip() and not l.startswith("Dummy")]
 
 
 def get_full_universe() -> List[str]:
