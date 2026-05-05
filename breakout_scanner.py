@@ -74,13 +74,7 @@ def load_state() -> dict:
             state_dict = {**default, "watchlist": data}
         else:
             state_dict = {**default, **data}
-            
-        # Clean out any test/dummy symbols
-        if "watchlist" in state_dict:
-            state_dict["watchlist"] = [s for s in state_dict["watchlist"] if not s.startswith("DUMMY")]
-        if "discovery" in state_dict:
-            state_dict["discovery"] = [s for s in state_dict["discovery"] if not s.startswith("DUMMY")]
-            
+
         return state_dict
     except Exception:
         return default
@@ -466,7 +460,8 @@ def analyze_ticker(sym: str, df: pd.DataFrame, is_manual: bool) -> Optional[Cand
             "VolMult": float(latest["vol_mult"]),
             "RSI": float(latest["rsi"]),
         })
-    except Exception:
+    except Exception as e:
+        print(f"  [WARN] {sym}: {e}", file=sys.stderr)
         return None
 
 
@@ -643,6 +638,10 @@ if __name__ == "__main__":
 
         alerted = set(state["alerted_today"])
         discovery_syms = state.get("discovery", [])
+        # --- Time Windows ---
+        is_morning = now.hour == 9 and 10 <= now.minute <= 14
+        is_eod = now.hour > 15 or (now.hour == 15 and now.minute >= 28)
+
         print(f"IST: {now.strftime('%Y-%m-%d %H:%M')} | Watchlist: {len(state['watchlist'])} | Discovery: {len(discovery_syms)}")
 
         # --- Market Regime Check ---
@@ -651,13 +650,20 @@ if __name__ == "__main__":
         if not regime_ok:
             send_telegram(f"*Market Regime: {regime}*\nBreakout quality is low in bear markets. Scanning with caution.")
 
+        # --- Morning startup notification ---
+        if is_morning:
+            send_telegram(
+                f"\U0001f50d *Morning Scan Started*\n"
+                f"IST: {now.strftime('%H:%M')} | Market: {regime}\n"
+                f"Watchlist: {len(state['watchlist'])} symbols"
+            )
+
         # --- Build scan universe ---
         nifty500 = get_nifty500()
         scan_symbols = list(set(nifty500 + discovery_syms + state.get("watchlist", [])))
         print(f"Daily Universe: {len(scan_symbols)} (N500: {len(nifty500)}, Discovery: {len(discovery_syms)})")
 
         # --- Morning Priority (09:10-09:14 IST) ---
-        is_morning = now.hour == 9 and 10 <= now.minute <= 14
         if is_morning:
             print("\nMORNING PRIORITY SCAN (Pre-open)...")
             if state.get("watchlist"):
@@ -693,18 +699,27 @@ if __name__ == "__main__":
                         alerted.add(row["Symbol"])
 
                 # Intraday: merge new finds into existing watchlist
-                if now.hour < 15 or (now.hour == 15 and now.minute < 28):
+                if not is_eod:
                     existing = set(state.get("watchlist", []))
                     new_wl = set(watchlist["Symbol"].tolist()) if not watchlist.empty else set()
+                    fresh = new_wl - existing
                     state["watchlist"] = list(existing | new_wl)
+                    # Notify only about newly discovered watchlist stocks
+                    if fresh and not watchlist.empty:
+                        new_entries = watchlist[watchlist["Symbol"].isin(fresh)]
+                        if not new_entries.empty:
+                            send_telegram(fmt_watchlist(new_entries, f"\U0001f195 NEW SETUPS ({len(fresh)})"))
 
         # --- EOD (15:30 IST) ---
         now = get_now_ist()
-        if now.hour >= 15 and now.minute >= 28:
+        is_eod = now.hour > 15 or (now.hour == 15 and now.minute >= 28)
+        if is_eod:
             print("\nEND OF DAY...")
             if not results.empty:
                 combined = pd.concat([watchlist, actionable]).drop_duplicates(subset=["Symbol"])
-                state["watchlist"] = combined["Symbol"].tolist()
+                # Merge today's scan with accumulated watchlist
+                existing = set(state.get("watchlist", []))
+                state["watchlist"] = list(existing | set(combined["Symbol"].tolist()))
 
                 if not combined.empty:
                     # Sector heatmap
@@ -715,12 +730,19 @@ if __name__ == "__main__":
                         sector_msg = "\n\nHot Sectors:\n" + "\n".join(f"- {s} ({c})" for s, c in hot.items())
                     send_telegram(fmt_watchlist(combined) + sector_msg)
                 else:
-                    send_telegram("*Market Closed* — No clean setups for tomorrow.")
+                    send_telegram("*Market Closed* \u2014 No clean setups for tomorrow.")
             else:
-                send_telegram("*Market Closed* — No clean setups for tomorrow.")
+                send_telegram("*Market Closed* \u2014 No clean setups for tomorrow.")
+
+            # EOD summary
+            send_telegram(
+                f"\U0001f4ca *Day Complete*\n"
+                f"Watchlist: {len(state['watchlist'])} | Alerted: {len(alerted)}\n"
+                f"Market: {regime}"
+            )
 
         # --- Weekly Discovery (Friday EOD) ---
-        if now.weekday() == 4 and now.hour >= 15 and now.minute >= 28:
+        if now.weekday() == 4 and is_eod:
             print("\nWEEKLY DEEP DIVE — Full Universe...")
             full_universe = get_full_universe()
             non_nifty = [s for s in full_universe if s not in set(nifty500)]
