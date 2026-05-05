@@ -65,7 +65,7 @@ def get_now_ist():
 # ============================================================
 
 def load_state() -> dict:
-    default = {"watchlist": [], "alerted_today": [], "alerted_date": "", "discovery": [], "discovery_date": ""}
+    default = {"watchlist": [], "alerted_today": [], "alerted_date": "", "discovery": [], "discovery_date": "", "eod_date": ""}
     if not STATE_FILE.exists():
         return default
     try:
@@ -631,6 +631,20 @@ if __name__ == "__main__":
         now = get_now_ist()
         today = now.strftime("%Y-%m-%d")
 
+        # --- Early Exits for 24/7 Cron schedules ---
+        if now.weekday() >= 5:
+            print("Weekend. Market is closed. Exiting.")
+            sys.exit(0)
+
+        current_time = now.hour * 100 + now.minute
+        if current_time < 910:
+            print("Before market hours. Exiting.")
+            sys.exit(0)
+
+        if state.get("eod_date") == today:
+            print(f"EOD already completed for {today}. Exiting.")
+            sys.exit(0)
+
         # Day reset
         if state.get("alerted_date") != today:
             state["alerted_today"] = []
@@ -764,6 +778,9 @@ if __name__ == "__main__":
                     print(f"  Promoted {len(promoted)} stocks to discovery list.")
 
         # --- Save ---
+        if is_eod:
+            state["eod_date"] = today
+            
         state["alerted_today"] = list(alerted)
         save_state(state)
         print(f"\nState saved: {len(state['watchlist'])} watchlist, {len(alerted)} alerted, {len(state.get('discovery', []))} discovery")
