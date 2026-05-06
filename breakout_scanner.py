@@ -653,7 +653,7 @@ Keep it highly actionable and conversational. Do not use markdown headers, just 
 """
     try:
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-        data = {"model": "llama3-70b-8192", "messages": [{"role": "user", "content": prompt}], "max_tokens": 150, "temperature": 0.3}
+        data = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": 150, "temperature": 0.3}
         resp = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data, timeout=15)
         resp.raise_for_status()
         verdict = resp.json()["choices"][0]["message"]["content"].strip()
