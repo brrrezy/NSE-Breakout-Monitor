@@ -1,0 +1,6 @@
+pandas
+yfinance
+ta
+requests
+tqdm
+numpypython-dotenv
