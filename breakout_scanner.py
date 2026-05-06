@@ -27,6 +27,9 @@ import requests
 import ta
 import yfinance as yf
 from tqdm import tqdm
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ============================================================
 # CONFIG
@@ -42,9 +45,11 @@ NIFTY500_CACHE = _CACHE_DIR / "nifty500.csv"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 # Playbook constants
 MIN_PRICE = 50
+MAX_PRICE = 800
 MIN_DATA_DAYS = 150
 BASE_MIN_DAYS = 5
 BASE_MAX_DAYS = 15
@@ -466,7 +471,7 @@ def analyze_ticker(sym: str, df: pd.DataFrame) -> Optional[Candidate]:
         price = float(latest["Close"])
 
         # Price filter
-        if price < MIN_PRICE:
+        if price < MIN_PRICE or price > MAX_PRICE:
             return None
 
         # Phase 1: Must be in uptrend
@@ -611,21 +616,70 @@ def _short(sym: str) -> str:
 def fmt_breakout(row) -> str:
     s = _short(row["Symbol"])
     return (
-        f"🚀 *{s}* — BREAKOUT\n\n"
-        f"Entry: ₹{row['Price']:.0f}\n"
-        f"Stop: ₹{row['Stop']:.0f} | Target: ₹{row['Target']:.0f}\n"
-        f"R:R {row['RR']}:1 | RVol: {row['RVol']:.1f}x\n\n"
-        f"{row['Notes']}")
+        f"🚀 *{s}* — BREAKOUT ALERT\n"
+        f"{'=' * 24}\n"
+        f"📍 Entry  : ₹{row['Price']:.0f}\n"
+        f"🛡️ Stop   : ₹{row['Stop']:.0f}\n"
+        f"🎯 Target : ₹{row['Target']:.0f}\n"
+        f"⚖️ R:R    : {row['RR']}:1\n"
+        f"📈 RVol   : {row['RVol']:.1f}x\n"
+        f"📝 Setup  : {row['Notes']}\n"
+        f"{'-' * 24}"
+    )
 
 
-def fmt_watchlist(df: pd.DataFrame, title: str = "WATCHLIST") -> str:
-    lines = []
+def get_groq_verdict(df: pd.DataFrame, is_eod: bool) -> str:
+    if not GROQ_API_KEY or df.empty:
+        return ""
+        
+    wl_text = ""
     for _, r in df.head(10).iterrows():
         s = _short(r["Symbol"])
-        lines.append(
-            f"• {s} ₹{r['Price']:.0f} → Pivot ₹{r['Pivot']:.0f}\n"
-            f"  {r['Notes']}")
-    return f"*{title}*\n\n" + "\n\n".join(lines)
+        dist_to_pivot = ((r['Pivot'] - r['Price']) / r['Price']) * 100 if r['Price'] > 0 else 0
+        wl_text += f"{s}: Gap {dist_to_pivot:.1f}%, Setup: {r['Notes']}\n"
+        
+    time_ctx = "End of Day (building tomorrow's watchlist)" if is_eod else "Morning (looking for immediate breakouts today)"
+    prompt = f"""
+You are an expert swing trader. I have a watchlist of stocks near their breakout pivot points.
+Time of day: {time_ctx}
+
+Here is the watchlist data:
+{wl_text}
+
+Provide a very short, punchy 'Final Verdict' (max 3-4 sentences). 
+Tell me which 1 or 2 stocks to prioritize based on the tightness of the base (high doji count), perfect confluence (6/6), proximity to pivot (Gap %), and SFP (Swing Failure Pattern).
+Point out any stock that can be ignored for now (e.g. gap is too large).
+Keep it highly actionable and conversational. Do not use markdown headers, just plain text with maybe some emojis.
+"""
+    try:
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        data = {"model": "llama3-70b-8192", "messages": [{"role": "user", "content": prompt}], "max_tokens": 150, "temperature": 0.3}
+        resp = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data, timeout=15)
+        resp.raise_for_status()
+        verdict = resp.json()["choices"][0]["message"]["content"].strip()
+        return f"\n\n🤖 *Groq Verdict:*\n{verdict}"
+    except Exception as e:
+        print(f"[GROQ] Error: {e}")
+        return ""
+
+
+def fmt_watchlist(df: pd.DataFrame, title: str = "WATCHLIST", is_eod: bool = False) -> str:
+    lines = [f"📋 *{title}*", "=" * 20]
+    for _, r in df.head(10).iterrows():
+        s = _short(r["Symbol"])
+        dist_to_pivot = 0.0
+        if r['Price'] > 0:
+            dist_to_pivot = ((r['Pivot'] - r['Price']) / r['Price']) * 100
+        
+        lines.append(f"👀 *{s}*")
+        lines.append(f"  • Price : ₹{r['Price']:.0f}")
+        lines.append(f"  • Pivot : ₹{r['Pivot']:.0f} (Gap: {dist_to_pivot:.1f}%)")
+        lines.append(f"  • Setup : {r['Notes']}")
+        lines.append("-" * 20)
+        
+    base_text = "\n".join(lines)
+    verdict = get_groq_verdict(df, is_eod)
+    return base_text + verdict
 
 
 # ============================================================
@@ -714,9 +768,12 @@ if __name__ == "__main__":
                 else []
             state["watchlist"] = new_wl
 
+            # Calculate is_eod before formatting
+            is_eod = now.hour > 15 or (now.hour == 15 and now.minute >= 28)
+            
             # Send watchlist
             if not watchlist.empty:
-                send_telegram(fmt_watchlist(watchlist))
+                send_telegram(fmt_watchlist(watchlist, is_eod=is_eod))
 
             # Summary
             print(f"\nResults: {len(actionable)} actionable, "
@@ -725,9 +782,9 @@ if __name__ == "__main__":
             state["watchlist"] = []
             print("\nNo setups found.")
             send_telegram("*Scan Complete* — No clean setups today.")
+            is_eod = now.hour > 15 or (now.hour == 15 and now.minute >= 28)
 
         # Save
-        is_eod = now.hour > 15 or (now.hour == 15 and now.minute >= 28)
         if is_eod:
             state["eod_date"] = today
 
