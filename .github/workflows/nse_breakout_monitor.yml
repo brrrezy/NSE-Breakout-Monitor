@@ -1,6 +1,13 @@
 name: NSE Breakout Scanner
 
 on:
+  schedule:
+    # 9:10 AM IST = 3:40 AM UTC — Pre-market scan
+    - cron: '40 3 * * 1-5'
+    # 11:00 AM IST = 5:30 AM UTC — Mid-morning breakout check
+    - cron: '30 5 * * 1-5'
+    # 3:35 PM IST = 10:05 AM UTC — EOD final scan
+    - cron: '5 10 * * 1-5'
   workflow_dispatch:
 
 env:
@@ -27,23 +34,32 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: watchlist_persistent.json
-          key: state-${{ github.run_id }}
+          key: scanner-state
           restore-keys: |
-            state-
+            scanner-state
 
       - name: Ensure State File Exists
-        run: touch watchlist_persistent.json
+        run: |
+          if [ ! -f watchlist_persistent.json ]; then
+            echo '{"watchlist":[],"alerted_today":[],"alerted_date":"","eod_date":""}' > watchlist_persistent.json
+          fi
 
-      - name: Run Screener
+      - name: Run Scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python3 breakout_scanner.py
 
+      - name: Delete Old State Cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache delete scanner-state || true
+
       - name: Save State Cache
         uses: actions/cache/save@v4
         if: always()
         with:
           path: watchlist_persistent.json
-          key: state-${{ github.run_id }}
+          key: scanner-state
