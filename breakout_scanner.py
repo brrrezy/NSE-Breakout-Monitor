@@ -53,7 +53,7 @@ MAX_PRICE = 800
 MIN_DATA_DAYS = 150
 BASE_MIN_DAYS = 5
 BASE_MAX_DAYS = 15
-RVOL_MULT = 1.5
+RVOL_MULT = 2.0
 UD_RATIO_MIN = 1.4
 CONFLUENCE_MIN = 4
 RISK_MAX_PCT = 0.03
@@ -186,6 +186,28 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Daily change
     df["pct_chg"] = c.pct_change()
 
+    # 120-day High & Liquidity
+    df["high_120"] = h.rolling(120).max()
+    df["turnover_ma50"] = df["vol_ma50"] * c
+
+    # ---- INSTITUTIONAL EDGE INDICATORS ----
+
+    # Relative Strength vs Nifty 50 (50-day performance ratio)
+    # This is computed later after Nifty data is available, placeholder here
+    df["rs_ratio"] = np.nan
+
+    # Accumulation/Distribution Score (last 20 days)
+    # Up close on above-avg vol = accumulation, down close on above-avg vol = distribution
+    up_vol = ((c > c.shift(1)) & (v > df["vol_ma50"])).astype(int)
+    dn_vol = ((c < c.shift(1)) & (v > df["vol_ma50"])).astype(int)
+    df["accum_days_20"] = up_vol.rolling(20).sum()
+    df["distrib_days_20"] = dn_vol.rolling(20).sum()
+
+    # Tightening Closes (last 5 days close-to-close range shrinking)
+    close_range = abs(c - c.shift(1))
+    df["close_range_5"] = close_range.rolling(5).std()
+    df["close_range_20"] = close_range.rolling(20).std()
+
     return df
 
 
@@ -193,19 +215,45 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # MARKET REGIME — Playbook: Nifty vs EMA-21 and EMA-55
 # ============================================================
 
-def check_market_regime() -> Tuple[bool, str]:
+_nifty_cache: Dict[str, Any] = {"close_series": None, "perf_50d": None}
+
+
+def _load_nifty_data():
+    """Load Nifty 50 data once and cache for RS calculations."""
+    if _nifty_cache["close_series"] is not None:
+        return
     try:
         nifty = yf.download("^NSEI", period="1y", interval="1d",
                             progress=False)
         if nifty.empty or len(nifty) < 60:
-            return True, "Unknown"
-
+            return
         if isinstance(nifty.columns, pd.MultiIndex):
             nifty.columns = nifty.columns.get_level_values(0)
+        _nifty_cache["close_series"] = nifty["Close"]
+        _nifty_cache["perf_50d"] = (
+            nifty["Close"].iloc[-1] / nifty["Close"].iloc[-50] - 1
+            if len(nifty) >= 50 else 0
+        )
+    except Exception:
+        pass
 
-        c = nifty["Close"].iloc[-1]
-        e21 = ta.trend.ema_indicator(nifty["Close"], 21)
-        e55 = ta.trend.ema_indicator(nifty["Close"], 55)
+
+def get_nifty_perf_50d() -> float:
+    """Return Nifty 50 performance over last 50 days."""
+    _load_nifty_data()
+    return _nifty_cache.get("perf_50d", 0) or 0
+
+
+def check_market_regime() -> Tuple[bool, str]:
+    _load_nifty_data()
+    try:
+        nifty_close = _nifty_cache["close_series"]
+        if nifty_close is None or len(nifty_close) < 60:
+            return True, "Unknown"
+
+        c = nifty_close.iloc[-1]
+        e21 = ta.trend.ema_indicator(nifty_close, 21)
+        e55 = ta.trend.ema_indicator(nifty_close, 55)
 
         ema21_now, ema55_now = e21.iloc[-1], e55.iloc[-1]
         ema21_5d, ema55_5d = e21.iloc[-5], e55.iloc[-5]
@@ -247,6 +295,24 @@ def detect_uptrend(df: pd.DataFrame) -> bool:
     # U/D ratio
     ud = latest["ud_ratio"]
     if pd.isna(ud) or ud < UD_RATIO_MIN:
+        return False
+
+    # Proximity to 120-day high (must be within 15%)
+    high_120 = latest["high_120"]
+    if pd.isna(high_120) or latest["Close"] < high_120 * 0.85:
+        return False
+        
+    # Minimum Liquidity (Avg daily turnover >= 10 Crores)
+    turnover = latest["turnover_ma50"]
+    if pd.isna(turnover) or turnover < 100_000_000:
+        return False
+
+    # Avoid exhausted/overextended setups
+    if latest.get("rsi", 100) >= 85:
+        return False
+    if latest["Close"] > latest["ema21"] * 1.15:
+        return False
+    if latest["Close"] > latest["ema144"] * 2.0:
         return False
 
     return True
@@ -292,15 +358,15 @@ def find_base(df: pd.DataFrame) -> Tuple[bool, Dict[str, Any]]:
                 continue
             ranges = base["High"] - base["Low"]
             small_pct = (ranges < adr_at_start * 1.2).sum() / len(base)
-            if small_pct < 0.5:
+            if small_pct < 0.65:
                 continue
 
-            # 2. Volume drying up during base
+            # 2. Volume drying up during base (Deep contraction)
             vol_ma = df["vol_ma50"].iloc[end_idx]
             if pd.isna(vol_ma) or vol_ma <= 0:
                 continue
             base_vol_avg = base["Volume"].mean()
-            if base_vol_avg >= vol_ma:
+            if base_vol_avg >= vol_ma * 0.75:
                 continue
 
             # 3. No close below EMA-21
@@ -327,6 +393,15 @@ def find_base(df: pd.DataFrame) -> Tuple[bool, Dict[str, Any]]:
             if last_close < pivot * 0.92:
                 continue
 
+            # 8. Structural Fakeout Prevention (Supply Bar)
+            # Detect candles with massive upper wicks and heavy volume
+            upper_wick = base["High"] - np.maximum(base["Close"], base["Open"])
+            body = abs(base["Close"] - base["Open"])
+            wick_ratio = upper_wick / (body + 1e-5)
+            supply_bar = (wick_ratio > 3) & (base["Volume"] > vol_ma * 1.5)
+            if supply_bar.any():
+                continue
+
             # --- BONUS SIGNALS ---
 
             # SFP: price dips below prior low, closes back above
@@ -345,12 +420,56 @@ def find_base(df: pd.DataFrame) -> Tuple[bool, Dict[str, Any]]:
             wick = (base["High"] - base["Low"]).replace(0, np.nan)
             doji_count = int((body / wick < 0.15).sum())
 
+            # --- INSTITUTIONAL EDGE SIGNALS ---
+
+            # VCP: Volatility Contraction Pattern
+            # Split base into halves — second half must have tighter range
+            half = len(base) // 2
+            if half >= 2:
+                first_half_range = (base["High"].iloc[:half] - base["Low"].iloc[:half]).mean()
+                second_half_range = (base["High"].iloc[half:] - base["Low"].iloc[half:]).mean()
+                has_vcp = second_half_range < first_half_range * 0.80
+            else:
+                has_vcp = False
+
+            # Pre-breakout volume coiling: last 3 days of base show
+            # rising volume while price stays flat (spring loading)
+            vol_coil = False
+            if len(base) >= 4:
+                last3_vol = base["Volume"].iloc[-3:]
+                last3_range = (base["High"].iloc[-3:] - base["Low"].iloc[-3:]).mean()
+                avg_base_range = ranges.mean()
+                if (last3_vol.is_monotonic_increasing
+                        and last3_range < avg_base_range * 0.9):
+                    vol_coil = True
+
+            # Tightening closes: std of last 5 close-to-close changes
+            # vs last 20 — if much lower, the stock is coiling
+            tightening = False
+            if end_idx >= 20:
+                cr5 = df["close_range_5"].iloc[end_idx]
+                cr20 = df["close_range_20"].iloc[end_idx]
+                if not pd.isna(cr5) and not pd.isna(cr20) and cr20 > 0:
+                    if cr5 < cr20 * 0.5:
+                        tightening = True
+
+            # Net accumulation: more accumulation days than distribution
+            accum = df["accum_days_20"].iloc[end_idx]
+            distrib = df["distrib_days_20"].iloc[end_idx]
+            net_accum = 0
+            if not pd.isna(accum) and not pd.isna(distrib):
+                net_accum = int(accum) - int(distrib)
+
             return True, {
                 "pivot": pivot,
                 "base_len": blen,
                 "has_sfp": has_sfp,
                 "doji_count": doji_count,
                 "base_end_offset": end_offset,
+                "has_vcp": has_vcp,
+                "vol_coil": vol_coil,
+                "tightening": tightening,
+                "net_accum": net_accum,
             }
 
     return False, {}
@@ -379,16 +498,16 @@ def is_breakout_candle(df: pd.DataFrame, pivot: float) -> bool:
     if body <= 0 or body / rng < 0.60:
         return False
 
-    # 3. Close in top 10% of day's range
-    if latest["Close"] < latest["High"] - rng * 0.10:
+    # 3. Close in top 8% of day's range (prevent intraday fakeouts)
+    if latest["Close"] < latest["High"] - rng * 0.08:
         return False
 
     # 4. RVol >= 1.5x
     if pd.isna(latest["rvol"]) or latest["rvol"] < RVOL_MULT:
         return False
 
-    # 5. Move >= 4% from previous close
-    if (latest["Close"] / prev_close - 1) < 0.04:
+    # 5. Move >= 4.5% from previous close
+    if (latest["Close"] / prev_close - 1) < 0.045:
         return False
 
     # 6. NOT up 3 consecutive days before today
@@ -486,6 +605,16 @@ def analyze_ticker(sym: str, df: pd.DataFrame) -> Optional[Candidate]:
         pivot = base_info["pivot"]
         end_offset = base_info["base_end_offset"]
 
+        # Compute Relative Strength vs Nifty 50
+        nifty_perf = get_nifty_perf_50d()
+        stock_perf = 0.0
+        if len(df) >= 50:
+            p_now = float(df["Close"].iloc[-1])
+            p_50 = float(df["Close"].iloc[-50])
+            if p_50 > 0:
+                stock_perf = p_now / p_50 - 1
+        rs_vs_nifty = round(stock_perf - nifty_perf, 4)
+
         # Determine status
         if end_offset == 1 and is_breakout_candle(df, pivot):
             # Base ended yesterday, today is breakout
@@ -506,6 +635,28 @@ def analyze_ticker(sym: str, df: pd.DataFrame) -> Optional[Candidate]:
         stop, target, rr, risk_ok = calc_risk(price, bo_low)
         conf = confluence_score(latest)
 
+        # Edge score: institutional signals
+        edge = 0
+        edge_tags = []
+        if base_info.get("has_vcp"):
+            edge += 2
+            edge_tags.append("VCP")
+        if base_info.get("vol_coil"):
+            edge += 2
+            edge_tags.append("VolCoil")
+        if base_info.get("tightening"):
+            edge += 1
+            edge_tags.append("Tight")
+        if base_info.get("net_accum", 0) >= 3:
+            edge += 2
+            edge_tags.append(f"Accum+{base_info['net_accum']}")
+        if rs_vs_nifty > 0.05:
+            edge += 2
+            edge_tags.append(f"RS+{rs_vs_nifty*100:.0f}%")
+        elif rs_vs_nifty > 0:
+            edge += 1
+            edge_tags.append(f"RS+{rs_vs_nifty*100:.0f}%")
+
         # Build notes
         parts = []
         parts.append(f"Base:{base_info['base_len']}d")
@@ -514,6 +665,8 @@ def analyze_ticker(sym: str, df: pd.DataFrame) -> Optional[Candidate]:
         if base_info["doji_count"] > 0:
             parts.append(f"Doji:{base_info['doji_count']}")
         parts.append(f"Conf:{conf}/6")
+        if edge_tags:
+            parts.append(f"Edge:{'+'.join(edge_tags)}")
         if status == "ACTIONABLE":
             parts.append(f"RVol:{latest['rvol']:.1f}x")
             if not risk_ok:
@@ -527,6 +680,7 @@ def analyze_ticker(sym: str, df: pd.DataFrame) -> Optional[Candidate]:
                 "Symbol": sym, "Status": status, "Price": price,
                 "Pivot": round(pivot, 2), "Stop": stop,
                 "Target": target, "RR": rr, "Score": conf,
+                "Edge": edge,
                 "Notes": ", ".join(parts),
                 "RSI": float(latest["rsi"]),
                 "RVol": float(latest["rvol"]) if not pd.isna(
@@ -535,10 +689,15 @@ def analyze_ticker(sym: str, df: pd.DataFrame) -> Optional[Candidate]:
                     latest["adx"]) else 0,
                 "UD": float(latest["ud_ratio"]) if not pd.isna(
                     latest["ud_ratio"]) else 0,
+                "RS_vs_Nifty": rs_vs_nifty,
                 "Breakout": status == "ACTIONABLE",
                 "BaseDays": base_info["base_len"],
                 "SFP": base_info["has_sfp"],
                 "Doji": base_info["doji_count"],
+                "VCP": base_info.get("has_vcp", False),
+                "VolCoil": base_info.get("vol_coil", False),
+                "Tightening": base_info.get("tightening", False),
+                "NetAccum": base_info.get("net_accum", 0),
             })
     except Exception as e:
         print(f"  [WARN] {sym}: {e}", file=sys.stderr)
@@ -599,7 +758,7 @@ def scan_universe(symbols: List[str], period: str = "2y",
 
     df_out = pd.DataFrame([c.details for c in candidates])
     return (df_out
-            .sort_values(["Breakout", "Score", "RVol"],
+            .sort_values(["Breakout", "Edge", "Score", "RVol"],
                          ascending=False)
             .head(15)
             .reset_index(drop=True))
@@ -615,6 +774,8 @@ def _short(sym: str) -> str:
 
 def fmt_breakout(row) -> str:
     s = _short(row["Symbol"])
+    edge_info = f"\n🧠 Edge   : {row.get('Edge', 0)}/9" if row.get('Edge', 0) > 0 else ""
+    rs_info = f"\n💪 RS     : {row.get('RS_vs_Nifty', 0)*100:+.0f}% vs Nifty" if row.get('RS_vs_Nifty') else ""
     return (
         f"🚀 *{s}* — BREAKOUT ALERT\n"
         f"{'=' * 24}\n"
@@ -622,7 +783,8 @@ def fmt_breakout(row) -> str:
         f"🛡️ Stop   : ₹{row['Stop']:.0f}\n"
         f"🎯 Target : ₹{row['Target']:.0f}\n"
         f"⚖️ R:R    : {row['RR']}:1\n"
-        f"📈 RVol   : {row['RVol']:.1f}x\n"
+        f"📈 RVol   : {row['RVol']:.1f}x"
+        f"{edge_info}{rs_info}\n"
         f"📝 Setup  : {row['Notes']}\n"
         f"{'-' * 24}"
     )
@@ -636,20 +798,41 @@ def get_groq_verdict(df: pd.DataFrame, is_eod: bool) -> str:
     for _, r in df.head(10).iterrows():
         s = _short(r["Symbol"])
         dist_to_pivot = ((r['Pivot'] - r['Price']) / r['Price']) * 100 if r['Price'] > 0 else 0
-        wl_text += f"{s}: Gap {dist_to_pivot:.1f}%, Setup: {r['Notes']}\n"
+        edge_val = r.get('Edge', 0)
+        rs_val = r.get('RS_vs_Nifty', 0)
+        vcp = "✅" if r.get('VCP') else "❌"
+        coil = "✅" if r.get('VolCoil') else "❌"
+        tight = "✅" if r.get('Tightening') else "❌"
+        net_acc = r.get('NetAccum', 0)
+        wl_text += (f"[{s}] Price: {r['Price']:.0f}, Pivot: {r['Pivot']:.0f} (Gap: {dist_to_pivot:.1f}%), "
+                    f"Base: {r.get('BaseDays', 0)}d, Conf: {r.get('Score', 0)}/6, Edge: {edge_val}/9, "
+                    f"RVol: {r.get('RVol', 0):.1f}x, RSI: {r.get('RSI', 0):.0f}, RS vs Nifty: {rs_val*100:+.1f}%, "
+                    f"VCP: {vcp}, VolCoil: {coil}, Tightening: {tight}, Net Accum: {net_acc}, "
+                    f"Setup: {r['Notes']}\n")
         
     time_ctx = "End of Day (building tomorrow's watchlist)" if is_eod else "Morning (looking for immediate breakouts today)"
     prompt = f"""
-You are an expert swing trader. I have a watchlist of stocks near their breakout pivot points.
+You are the best stock analyst in the Indian stock market with 50 years of experience. You have the most accurate analysis and prediction skills.
+Your goal is to find A+ grade momentum bursts while strictly avoiding fakeouts, already broken-out stocks, and exhausted setups. You deeply consider market structure, sentiment, and recent news context.
 Time of day: {time_ctx}
 
-Here is the watchlist data:
+Key edge signals to evaluate:
+- VCP (Volatility Contraction Pattern): The base is tightening — second half has narrower ranges than first. Shows supply drying up.
+- VolCoil: Volume is INCREASING in last 3 days while price stays flat. Institutions are loading before the breakout.
+- Tightening: Close-to-close moves are shrinking dramatically. The stock is coiling like a spring.
+- Net Accum: Count of accumulation days minus distribution days over 20 sessions. Higher = smart money buying.
+- RS vs Nifty: Stock's 50-day performance minus Nifty 50's. Positive = outperforming the market = relative strength leader.
+- Edge Score: Composite score (0-9) of all the above signals. Higher = more institutional footprints.
+
+Watchlist Data:
 {wl_text}
 
-Provide a very short, punchy 'Final Verdict' (max 3-4 sentences). 
-Tell me which 1 or 2 stocks to prioritize based on the tightness of the base (high doji count), perfect confluence (6/6), proximity to pivot (Gap %), and SFP (Swing Failure Pattern).
-Point out any stock that can be ignored for now (e.g. gap is too large).
-Keep it highly actionable and conversational. Do not use markdown headers, just plain text with maybe some emojis.
+Provide a short, punchy 'Final Verdict' (max 4-5 sentences).
+1. Prioritize stocks with the HIGHEST Edge score, VCP+VolCoil combo, and strong RS vs Nifty. These have institutional footprints.
+2. Actively dismiss stocks with weak edge signals (no VCP, no accumulation, negative RS vs Nifty).
+3. If a stock shows VCP + VolCoil + Tightening together, flag it as a top priority — this is the coiled spring pattern.
+4. If none look like A+ explosive setups, say so clearly. Do not hype up a weak chart.
+Keep it highly actionable and conversational. Do not use markdown headers, just plain text with some emojis.
 """
     try:
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -717,9 +900,9 @@ if __name__ == "__main__":
             print("Before market hours. Exiting.")
             sys.exit(0)
 
-        # Already ran today
+        # Already completed EOD scan today
         if state.get("eod_date") == today:
-            print(f"Already completed for {today}. Exiting.")
+            print(f"Already completed EOD for {today}. Exiting.")
             sys.exit(0)
 
         # Day reset
@@ -728,8 +911,10 @@ if __name__ == "__main__":
             state["alerted_date"] = today
 
         alerted = set(state["alerted_today"])
+        is_eod = now.hour > 15 or (now.hour == 15 and now.minute >= 28)
 
         print(f"IST: {now.strftime('%Y-%m-%d %H:%M')} | "
+              f"Mode: {'EOD' if is_eod else 'INTRADAY'} | "
               f"Watchlist: {len(state['watchlist'])}")
 
         # Market regime
@@ -755,34 +940,38 @@ if __name__ == "__main__":
             actionable = results[results["Status"] == "ACTIONABLE"]
             watchlist = results[results["Status"] == "WATCHLIST"]
 
-            # Alert breakouts
+            # === BREAKOUT ALERTS (sent immediately, deduplicated) ===
+            new_breakouts = 0
             for _, row in actionable.iterrows():
                 if row["Symbol"] not in alerted:
                     send_telegram(fmt_breakout(row))
                     alerted.add(row["Symbol"])
+                    new_breakouts += 1
                     print(f"  🚀 {row['Symbol']} BREAKOUT "
                           f"₹{row['Price']:.0f}")
+                else:
+                    print(f"  ⏩ {_short(row['Symbol'])} already alerted, skipping.")
 
             # Update watchlist — REPLACE, don't accumulate
             new_wl = watchlist["Symbol"].tolist() if not watchlist.empty \
                 else []
             state["watchlist"] = new_wl
 
-            # Calculate is_eod before formatting
-            is_eod = now.hour > 15 or (now.hour == 15 and now.minute >= 28)
-            
-            # Send watchlist
-            if not watchlist.empty:
-                send_telegram(fmt_watchlist(watchlist, is_eod=is_eod))
+            # === WATCHLIST: Only send at EOD (one clean summary) ===
+            if is_eod and not watchlist.empty:
+                send_telegram(fmt_watchlist(watchlist, is_eod=True))
+                print(f"  📋 EOD watchlist sent ({len(watchlist)} stocks)")
 
             # Summary
-            print(f"\nResults: {len(actionable)} actionable, "
+            print(f"\nResults: {len(actionable)} actionable "
+                  f"({new_breakouts} new), "
                   f"{len(watchlist)} watchlist")
         else:
             state["watchlist"] = []
             print("\nNo setups found.")
-            send_telegram("*Scan Complete* — No clean setups today.")
-            is_eod = now.hour > 15 or (now.hour == 15 and now.minute >= 28)
+            # Only notify 'no setups' at EOD, not every scan
+            if is_eod:
+                send_telegram("*EOD Scan Complete* — No clean setups today.")
 
         # Save
         if is_eod:
