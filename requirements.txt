@@ -1,7 +1,11 @@
 pandas
+numpy
 yfinance
 ta
 requests
 tqdm
-numpy
 python-dotenv
+pyyaml
+feedparser
+scikit-learn
+pytest

@@ -22,4 +22,11 @@ Thumbs.db
 
 # Scanner runtime files
 watchlist_persistent.json
+scan_history.db
 
+# Cache
+nse_screener_cache/
+*.parquet
+
+# Logs
+*.log

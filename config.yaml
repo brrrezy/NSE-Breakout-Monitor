@@ -1,0 +1,52 @@
+# ============================================================
+# NSE Breakout Detection Engine — Configuration
+# ============================================================
+# Override any default from config/settings.py here.
+# Delete a key to use the default value.
+
+# ── Data ──
+data_period: "2y"
+data_interval: "1d"
+
+# ── Universe Filters ──
+min_price: 50
+max_price: 5000
+min_turnover_cr: 10              # Average daily turnover threshold in ₹ Crores
+
+# ── Scoring ──
+scoring_shortlist_threshold: 65  # Minimum composite score (0-100) to shortlist
+scoring_top_n: 15                # Max stocks in output
+
+scoring_weights:
+  technical: 0.10
+  liquidity: 0.08
+  momentum: 0.10
+  volume: 0.10
+  trend: 0.10
+  relative_strength: 0.08
+  pattern: 0.08
+  news: 0.06
+  risk: 0.08
+  market: 0.05
+  volatility: 0.05
+  base_quality: 0.07
+  breakout_probability: 0.05
+
+# ── Risk Management ──
+risk_max_pct: 0.03               # Max acceptable stop-loss distance
+risk_rr_min: 1.5                 # Minimum reward:risk ratio
+risk_position_risk_pct: 0.0075   # Risk 0.75% of capital per trade
+
+# ── News Engine ──
+news_enabled: true
+groq_model: "llama-3.3-70b-versatile"
+
+# ── Adaptive Learning ──
+learning_enabled: true
+
+# ── Feature Flags ──
+enable_news_engine: true
+enable_learning: true
+enable_liquidity_analysis: true
+enable_pattern_detection: true
+enable_market_context: true
