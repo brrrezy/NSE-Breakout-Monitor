@@ -104,7 +104,6 @@ Rules:
 
         content = resp.json()["choices"][0]["message"]["content"].strip()
 
-        # Parse JSON from response (handle markdown code blocks)
         if content.startswith("```"):
             content = content.split("```")[1]
             if content.startswith("json"):
@@ -112,7 +111,6 @@ Rules:
 
         result = json.loads(content)
 
-        # Validate and clamp values
         result["sentiment_score"] = max(-1.0, min(1.0,
             float(result.get("sentiment_score", 0))))
         result["news_score"] = max(-100, min(100,
@@ -122,10 +120,7 @@ Rules:
         result["confidence"] = max(0.0, min(1.0,
             float(result.get("confidence", 0.5))))
 
-        # Apply time decay
         result["time_decay"] = _compute_time_decay(headlines)
-
-        # Adjust scores by time decay
         decay = result["time_decay"]
         result["news_score"] = int(result["news_score"] * decay)
         result["sentiment_score"] = round(
@@ -144,21 +139,15 @@ Rules:
 
 
 def _compute_time_decay(headlines: List[dict]) -> float:
-    """
-    Compute time decay factor based on headline freshness.
-    Half-life = 3 days.
-    """
     cfg = Settings.get()
     half_life = cfg.news_time_decay_halflife_days
     now = datetime.now()
 
-    # Try to parse published dates
     ages_days = []
     for h in headlines:
         pub = h.get("published", "")
         if pub:
             try:
-                # feedparser dates are typically in various formats
                 from email.utils import parsedate_to_datetime
                 dt = parsedate_to_datetime(pub)
                 age = (now - dt.replace(tzinfo=None)).total_seconds() / 86400
@@ -167,18 +156,15 @@ def _compute_time_decay(headlines: List[dict]) -> float:
                 pass
 
     if not ages_days:
-        return 0.7  # Default moderate decay for undated news
+        return 0.7
 
     avg_age = sum(ages_days) / len(ages_days)
-
     import math
-    # Exponential decay: 2^(-age/half_life)
     decay = math.pow(2, -avg_age / half_life)
     return round(max(0.1, min(1.0, decay)), 3)
 
 
 def _neutral_sentiment() -> Dict[str, Any]:
-    """Return neutral sentiment (no news or analysis failed)."""
     return {
         "sentiment_score": 0.0,
         "news_score": 0,
@@ -193,63 +179,40 @@ def _neutral_sentiment() -> Dict[str, Any]:
 def get_groq_verdict(candidates: List[Dict],
                      is_eod: bool = False) -> str:
     """
-    Get Groq AI's overall verdict on the watchlist.
-    Enhanced from the original scanner.
+    Get Groq AI's verdict focused solely on News Catalysts.
     """
     cfg = Settings.get()
 
     if not cfg.groq_api_key or not candidates:
         return ""
 
-    # Build summary text for each candidate
-    wl_text = ""
-    for c in candidates[:10]:
+    # Build summary text of news for the top 5 candidates
+    news_text = ""
+    for c in candidates[:5]:
         sym = c.get("symbol", "").replace(".NS", "")
-        scores = c.get("scores", {})
-        base_info = c.get("base_info", {})
-        strength = c.get("strength", {})
-        price = c.get("price", 0)
-        pivot = c.get("pivot", 0)
-        dist = ((pivot - price) / price * 100) if price > 0 else 0
+        news = c.get("news", {})
+        summary = news.get("summary", "No recent news.")
+        cat_type = news.get("catalyst_type", "None")
+        cat_str = news.get("catalyst_strength", 0)
+        news_text += f"[{sym}] Catalyst: {cat_type} (Strength: {cat_str}/10). Summary: {summary}\n"
 
-        wl_text += (
-            f"[{sym}] Price: {price:.0f}, Pivot: {pivot:.0f} "
-            f"(Gap: {dist:.1f}%), "
-            f"Score: {scores.get('composite', 0):.0f}/100, "
-            f"Base: {base_info.get('base_len', 0)}d, "
-            f"VCP: {'✅' if base_info.get('has_vcp') else '❌'}, "
-            f"Coil: {'✅' if base_info.get('vol_coil') else '❌'}, "
-            f"Tight: {'✅' if base_info.get('tightening') else '❌'}, "
-            f"RS: {strength.get('rs_composite', 0)*100:+.0f}%, "
-            f"Squeeze: {'✅' if base_info.get('squeeze_active') else '❌'}\n"
-        )
+    if not news_text:
+        return ""
 
-    time_ctx = ("End of Day (building tomorrow's watchlist)"
-                if is_eod else
-                "Morning (looking for immediate breakouts)")
+    prompt = f"""You are a fundamental market analyst. I have a watchlist of top technical setups.
+Your job is to read their recent news summaries and provide a single paragraph verdict on their fundamental catalysts.
 
-    prompt = f"""You are the best stock analyst in the Indian stock market with 50 years of experience.
-Your goal is to find A+ grade momentum bursts while strictly avoiding fakeouts and exhausted setups.
+Watchlist News Data:
+{news_text}
 
-Time of day: {time_ctx}
-
-Key signals:
-- VCP (Volatility Contraction): supply drying up
-- VolCoil: institutions loading before breakout
-- Tightening: stock coiling like a spring
-- Squeeze: Bollinger inside Keltner — compressed volatility
-- RS vs Nifty: positive = market leader
-- Score: composite institutional quality (0-100)
-
-Watchlist:
-{wl_text}
-
-Provide a short, punchy verdict (max 4-5 sentences):
-1. Prioritize stocks with highest Score AND VCP+Coil combo
-2. Dismiss weak setups clearly
-3. If VCP + Coil + Tight + Squeeze all present, flag as TOP PRIORITY
-4. If none are A+ setups, say so clearly
-Plain text with emojis. No markdown headers."""
+Task:
+Write a single, highly professional 3-4 sentence briefing.
+- Tell me which stock has the best fundamental tailwind to support a breakout.
+- Tell me which stock to avoid due to bearish, conflicting, or non-existent news.
+- DO NOT use emojis.
+- DO NOT use generic phrases like "The market is dynamic."
+- Be clinical, direct, and analytical.
+"""
 
     try:
         headers = {
@@ -259,15 +222,24 @@ Plain text with emojis. No markdown headers."""
         data = {
             "model": cfg.groq_model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": cfg.groq_verdict_max_tokens,
-            "temperature": 0.3,
+            "max_tokens": 250,
+            "temperature": 0.2,
         }
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers=headers, json=data, timeout=15)
         resp.raise_for_status()
         verdict = resp.json()["choices"][0]["message"]["content"].strip()
-        return f"\n\n🤖 *Groq Verdict:*\n{verdict}"
+        
+        # Wrap in clean monospaced block
+        return (
+            f"\n```text\n"
+            f"[ CATALYST VERDICT ]\n"
+            f"=========================================\n"
+            f"{verdict}\n"
+            f"=========================================\n"
+            f"```"
+        )
     except Exception as e:
         print(f"[GROQ] Error: {e}", file=sys.stderr)
         return ""
